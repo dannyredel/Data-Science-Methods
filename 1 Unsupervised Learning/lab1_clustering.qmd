@@ -1,0 +1,577 @@
+---
+title: "Clustering Methods"
+author: "Daniel Redel"
+toc: true
+format:
+  html:
+    html-math-method: katex
+    code-tools: true
+    self-contained: true
+execute:
+  warning: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls())
+library(ISLR2)
+library(tidyverse)
+library(gtsummary)
+library(kableExtra)
+library(factoextra)
+library(broom)
+library(ggpubr)
+library(ClusterR)
+library(cluster)
+library(fpc)
+library(cvms)
+```
+
+# ISLR: Simulated Data
+
+We begin with a simple simulated example in which there truly are two clusters in the data: the first 25 observations have a mean shift relative to the next 25 observations:
+
+```{r}
+set.seed(2)
+
+data <- tibble(
+  V1 = rnorm(n = 50, mean = rep(c(0, 3), each = 25)),
+  V2 = rnorm(n = 50, mean = rep(c(0, -4), each = 25))
+)
+
+data1 <- data[1:25,] %>% 
+  mutate(group = 1)
+data2 <- data[26:50,] %>% 
+  mutate(group = 2)
+
+data0 <- rbind(data1, data2)
+```
+
+## Summary Statistics
+
+In @tbl-summary1 we can observe how their within means differ to each other:
+
+```{r}
+#| label: tbl-summary1
+#| tbl-cap: "Summary Statistics"
+vtable::sumtable(data0, group = "group",  
+         summ=c('mean(x)', 'sd(x)', 'min(x)', 'max(x)'), 
+         out = 'return') %>% 
+  kbl() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed")) %>% 
+  add_header_above(c(" " = 1, "Group 1" = 4, "Group 2" = 4))
+```
+
+Let's also plot the groups using `ggplot()`:
+
+```{r, fig.align='center'}
+#| label: fig-kmeans1
+#| fig-cap: "True Cluster Groups"
+data %>%
+  ggplot(aes(V1, V2, color = rep(c("A", "B"), each = 25))) +
+  geom_point() +
+  labs(color = "Group") + theme_bw()
+```
+
+## K-Means Clustering
+
+We now perform K-means clustering with $K = 2$ . To run the `kmeans()` function in R with multiple initial cluster assignments, we use the `nstart` argument. If a value of `nstart` greater than one is used, then K-means clustering will be performed using multiple initial random assignments, and the `kmeans()` function will report only the best results.
+
+```{r}
+km.out <- kmeans(data, 2, nstart = 20)
+```
+
+The cluster assignments of the 50 observations are contained in `km.out$cluster`:
+
+```{r}
+km.out$cluster
+```
+
+If we compare their centroids to the means calculated in @tbl-summary1, we see that they are quite similar:
+
+```{r}
+km.out$centers %>% 
+  kbl() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+We can plot the data, with each observation colored according to its cluster assignment:
+
+```{r, fig.align='center'}
+#| label: fig-kmeans2
+#| fig-cap: "K-Means Clustering Results K = 2"
+data %>%
+  ggplot(aes(V1, V2, color = as.factor(km.out$cluster))) +
+  geom_point() +
+  labs(color = "Cluster") + theme_bw()
+```
+
+Comparing the clusters between @fig-kmeans2 and @fig-kmeans1, we found that they do not contain exactly the same observations within each cluster.
+
+```{r, fig.align='center', cache=TRUE}
+fviz_cluster(km.out, data=data, geom="point", ggtheme = theme_bw())+
+  ggtitle("K-means Clustering (K=2)")
+```
+
+We can run K-means with different values for the number of clusters such as `K = 3` and plot the results.
+
+```{r}
+km.out <- kmeans(data, 3, nstart = 20)
+```
+
+```{r, fig.align='center', warning=FALSE, message=FALSE, cache=TRUE}
+#| label: fig-kmeans3
+#| fig-cap: "K-Means Clustering Results K = 3"
+#| code-fold: true
+fviz_cluster(km.out, data=data, geom="point", ggtheme = theme_bw())+
+  ggtitle("K-means Clustering (K=3)")
+```
+
+### Silhouette Criteria
+
+To select the optimal number of clusters for k-means clustering, we can implement the **"elbow" method**. The *elbow method* runs k-means clustering on the dataset for a range of values for k (say from 1-10) and then, for each value of `k`,computes an average score for all clusters.
+
+When these overall metrics for each model are plotted, it is possible to visually determine the best value for `k`. If the line chart looks like an arm, ***then the "elbow" (the point of inflection on the curve) is the best value of*** **`k`**. The "arm" can be either up or down, but if there is a strong inflection point, it is a good indication that the underlying model fits best at that point.
+
+Let's compute first the mean `silhouette` coefficient, which measures the mean ratio of intra-cluster and nearest-cluster distance.
+
+```{r, fig.align='center', cache=TRUE}
+#| label: fig-sil1
+#| fig-cap: "Silhouette Criteria N°1"
+# function to compute average silhouette for k clusters
+avg_sil <- function(k) {
+  km.res <- kmeans(data, centers = k, nstart = 25)
+  ss <- silhouette(km.res$cluster, dist(data))
+  mean(ss[, 3])
+}
+
+# Compute and plot wss for k = 2 to k = 10
+k.values <- 2:10
+
+# extract avg silhouette for 2-10 clusters
+avg_sil_values <- c(0,map_dbl(k.values, avg_sil))
+
+plot(c(1,k.values), avg_sil_values,
+       type = "b", pch = 19, frame = FALSE, 
+       xlab = "Number of clusters K",
+       ylab = "Average Silhouettes")
+abline(v = 2, lty=2)
+```
+
+This process to compute the average silhoutte method has been wrapped up in a single function called `fviz_nbclust` from the `factoextra` package:
+
+```{r, fig.align='center', cache=TRUE}
+#| label: fig-sil2
+#| fig-cap: "Silhouette Criteria N°1"
+#| code-fold: true
+fviz_nbclust(data, kmeans, method = "silhouette", linecolor="#00BFC4") +
+  geom_vline(xintercept = 2, linetype = 2) +
+  ggtitle("Silhouette Coefficient") + theme_bw()
+```
+
+### Calinski-Harabaz Score
+
+Alternatively, the Calinski-Harabasz (CH) criteria can be used to evaluate the model. The `calinski_harabasz` score (also known as **Variance ratio criterion**) computes the ratio of dispersion between and within clusters.
+
+```{r}
+# function to compute average silhouette for k clusters
+calinski <- function(k) {
+  km.res <- kmeans(data, centers = k, nstart = 25)
+  ss <- calinhara(data, km.res$cluster)
+}
+
+# Compute and plot wss for k = 2 to k = 10
+k.values <- 2:10
+
+# extract avg silhouette for 2-10 clusters
+calinski <- c(0, map_dbl(k.values, calinski))
+calinksi1 <- data.frame(cbind(kvalues = c(1,k.values), calinksi = calinski))
+
+plot(c(1,k.values), calinski,
+       type = "b", pch = 19, frame = FALSE, 
+       xlab = "Number of clusters K",
+       ylab = "Calinski-Harabaz Score")
+abline(v = 2, lty=2)
+```
+
+## Hierarchical Clustering
+
+We can use **hierarchical clustering** on the dataset we generated in the previous exercise using the [`hclust()`](http://bit.ly/R_hclust) function.
+
+We will use the data to plot the hierarchical clustering dendrogram using `complete`, `single`, and `average` linkage clustering, with *Euclidean distance* as the dissimilarity measure.
+
+```{r}
+hc.complete <- hclust(dist(data), method = "complete")
+```
+
+```{r}
+hc.average <- hclust(dist(data), method = "average")
+```
+
+```{r}
+hc.single <- hclust(dist(data), method = "single")
+```
+
+```{r, fig.align='center', cache=TRUE}
+#| label: fig-dendogram1
+#| fig-cap: "Dendogram: Hierarchical Clustering"
+par(mfrow = c(1, 3))
+plot(hc.complete, main = "Complete Linkage", xlab = "", sub = "", cex = 0.9)
+plot(hc.average, main = "Average Linkage", xlab = "", sub = "", cex = 0.9)
+plot(hc.single, main = "Single Linkage", xlab = "", sub = "", cex = 0.9)
+```
+
+The [factoextra](https://rpkgs.datanovia.com/factoextra/) package also provides the `fviz_dend()` function to visualize the clustering created:
+
+```{r, cache=TRUE}
+#| code-fold: true
+complete_plot1 <- hc.complete %>% fviz_dend(main = "Complete Linkage", k = 2)
+average_plot1 <- hc.average %>% fviz_dend(main = "Average Linkage", k = 2)
+single_plot1 <- hc.single %>% fviz_dend(main = "Single Linkage", k = 2)
+```
+
+```{r, fig.align='center', cache=TRUE, echo=FALSE}
+#| label: fig-dendogram2
+#| fig-cap: "Dendogram: Hierarchical Clustering (K=2)"
+ggarrange(complete_plot1, average_plot1, single_plot1, ncol = 2, nrow = 2)
+```
+
+### Number of Clusters
+
+We can color according to `k = 4` clusters and we get the following separations:
+
+```{r, cache=TRUE}
+#| code-fold: true
+complete_plot1 <- hc.complete %>% fviz_dend(main = "Complete Linkage", k = 4)
+average_plot1 <- hc.average %>% fviz_dend(main = "Average Linkage", k = 4)
+single_plot1 <- hc.single %>% fviz_dend(main = "Single Linkage", k = 4)
+```
+
+```{r, fig.align='center', echo=TRUE}
+#| label: fig-dendogram3
+#| fig-cap: "Dendogram: Hierarchical Clustering (K=4)"
+ggarrange(complete_plot1, average_plot1, single_plot1, ncol = 2, nrow = 2)
+```
+
+### Scaling the Data
+
+If we don't know the importance of the different predictors in data set it could be beneficial to scale the data such that each variable has the same influence. We will use a recipe and workflow to do this.
+
+```{r, cache=TRUE}
+xsc <- scale(data)
+
+hc.xsc.complete <- hclust(dist(xsc), method = "complete")
+hc.xsc.average <- hclust(dist(xsc), method = "average")
+hc.xsc.single <- hclust(dist(xsc), method = "single")
+
+complete_plot1 <- hc.xsc.complete %>% fviz_dend(main = "Complete Linkage", k = 2)
+average_plot1 <- hc.xsc.average %>% fviz_dend(main = "Average Linkage", k = 2)
+single_plot1 <- hc.xsc.single %>% fviz_dend(main = "Single Linkage", k = 2)
+```
+
+@fig-dendogram4 report the results after scaling our covariates:
+
+```{r, fig.align='center', echo=TRUE}
+#| label: fig-dendogram4
+#| fig-cap: "Dendogram: Hierarchical Clustering with Scaled Covariates (K=2)"
+#| code-fold: true
+ggarrange(complete_plot1, average_plot1, single_plot1, ncol = 2, nrow = 2)
+```
+
+### Correlated-Based Distance
+
+Correlation-based distance can be computed using the `as.dist()` function, which converts an arbitrary square symmetric matrix into a form that the `hclust()` function recognizes as a distance matrix. However, this only makes sense for data with at least three features since the absolute correlation between any two observations with measurements on two features is always 1. Hence, we will cluster a *three-dimensional data set*. Our results can be visually seen in @fig-dendogram5.
+
+```{r, fig.align='center'}
+#| label: fig-dendogram5
+#| fig-cap: "Dendogram: Correlation-Based Hierarchical Clustering"
+set.seed(3)
+x <- matrix(rnorm(30 * 3), ncol = 3)
+dd <- as.dist(1 - cor(t(x)))
+plot(hclust(dd, method = "complete"), main = "Complete Linkage with Correlation -Based Distance", xlab = "", sub = "")
+```
+
+# ISLR: NCI60 Cancer Data
+
+Let us now see what happens if we perform clustering on the `nci60` data set, with the goal of finding out whether or not the observations cluster into distinct types of cancer.
+
+Before we start it would be good if we create a *scaled version* of this data set.
+
+```{r}
+nci.data <- NCI60$data
+nci.labs <- NCI60$labs
+sd.data <- scale(nci.data)
+data_dist <- dist(sd.data)
+```
+
+## Hierarchical Clustering
+
+```{r, fig.align='center'}
+#| label: fig-dendogram6
+#| fig-cap: "Dendogram: Hierarchical Clustering"
+par(mfrow = c(1, 3))
+plot(hclust(data_dist, method = "complete"), labels = nci.labs, main = "Complete Linkage")
+plot(hclust(data_dist, method = "average"), labels = nci.labs, main = "Average Linkage")
+plot(hclust(data_dist, method = "single"), labels = nci.labs, main = "Single Linkage")
+```
+
+### Choosing the Optimal K Clusters
+
+```{r, cache=TRUE}
+# Ward
+complete_HC <- function(x,k){hcut(x, k, hc_method = "ward.D2", hc_metric="euclidian")}
+sil_plot1 <- fviz_nbclust(sd.data, complete_HC, method = "silhouette", linecolor="#00BFC4") + ggtitle("Ward.D2") + theme_bw()
+
+# Complete
+complete_HC <- function(x,k){hcut(x, k, hc_method ="complete" , hc_metric="euclidian")}
+sil_plot2 <- fviz_nbclust(sd.data, complete_HC, method = "silhouette", linecolor="#00BFC4") + ggtitle("Complete") + theme_bw()
+
+# Average
+average_HC <- function(x,k){hcut(x, k, hc_method ="average" , hc_metric="euclidian")}
+sil_plot3 <- fviz_nbclust(sd.data, average_HC, method = "silhouette", linecolor="#00BFC4") + ggtitle("Average") + theme_bw()
+
+# Single
+single_HC <- function(x,k){hcut(x, k, hc_method ="single" , hc_metric="euclidian")}
+sil_plot4 <- fviz_nbclust(sd.data, single_HC, method = "silhouette", linecolor="#00BFC4") + ggtitle("Single") + theme_bw()
+```
+
+```{r, fig.align='center'}
+#| label: fig-silhouettes9
+#| fig-cap: "Dendogram: Hierarchical Clustering"
+#| code-fold: true
+ggarrange(sil_plot1, sil_plot2, sil_plot3, sil_plot4, ncol = 2, nrow = 2)
+```
+
+We cut the tree to give us the correspondent clusters:
+
+```{r, cache=TRUE, warning=FALSE, message=FALSE}
+nci.hc.ward <- hclust(data_dist, method = "ward.D2")
+nci.hc.complete <- hclust(data_dist, method = "complete")
+nci.hc.average <- hclust(data_dist, method = "average")
+nci.hc.single <- hclust(data_dist, method = "single")
+
+ward_plot2 <- nci.hc.ward %>% fviz_dend(main = "Ward.D2 Linkage", k = 7)
+complete_plot2 <- nci.hc.complete %>% fviz_dend(main = "Complete Linkage", k = 2)
+average_plot2 <- nci.hc.average %>% fviz_dend(main = "Average Linkage", k = 2)
+single_plot2 <- nci.hc.single %>% fviz_dend(main = "Single Linkage", k = 2)
+```
+
+```{r, fig.align='center', echo=TRUE, warning=FALSE, message=FALSE}
+#| label: fig-dendogram7
+#| fig-cap: "Dendogram: Hierarchical Clustering (K=7)"
+#| code-fold: true
+ggarrange(ward_plot2, complete_plot2, average_plot2, single_plot2, ncol = 2, nrow = 2)
+```
+
+## K-Means Clustering
+
+How do these `NCI60` hierarchical clustering results compare to what we get if we perform K-means clustering with `K=4`?
+
+```{r, fig.align='center', cache=TRUE}
+#| label: fig-sil8
+#| fig-cap: "Silhouette Criteria"
+#| code-fold: true
+fviz_nbclust(sd.data, kmeans, method = "silhouette", linecolor="#00BFC4") +
+  ggtitle("Silhouette Coefficient") + theme_bw()
+```
+
+Let's save the cluster ids in `nci.cluster_kmeans` and `nci.hc.clusters` and then use `plot_confusion_matrix()` to build a some kind of *"confusion matrix"* between the two methods:
+
+```{r}
+set.seed(2)
+km.out <- kmeans(sd.data, 2, nstart = 20)
+nci.km.clusters <- km.out$cluster
+nci.hc.clusters <- cutree(nci.hc.complete, 2)
+```
+
+```{r, fig.align='center', cache=TRUE, message=FALSE, warning=FALSE}
+#| label: fig-confusion1
+#| fig-cap: "Confusion Matrix"
+#| code-fold: true
+cfm <- tibble(kmeans = nci.km.clusters, hclust = nci.hc.clusters) 
+basic_table <- table(cfm)
+plot_confusion_matrix(as_tibble(basic_table), 
+                      target_col = "kmeans", 
+                      prediction_col = "hclust",
+                      counts_col = "n",
+                      add_normalized = FALSE) + 
+  ylab("Hierarchical") + xlab("K-Means")
+```
+
+Even is there may be not a lot of agreement between labels which makes sense (the labels themselves are arbitrarily added), they tend to agree quite a lot.
+
+## PCA & Hierachical Clustering
+
+One last thing is that it is sometimes useful to perform dimensionality reduction before using the clustering method. Let us use the recipes package to calculate the PCA of `nci60` and keep the 5 first components.
+
+```{r}
+pr_out <- prcomp(NCI60$data, scale = TRUE)
+pr_out_x <- pr_out$x %>% as_tibble(rownames = "Variable")
+```
+
+```{r}
+hc.out <- hclust(dist(pr_out_x[, 1:5]))
+plot(hc.out, labels = nci.labs, main = "Hier. Clust. on First 5 Score Vectors ")
+```
+
+We will only use the `complete` linkage:
+
+```{r, fig.align='center', cache=TRUE, message=FALSE, warning=FALSE}
+#| label: fig-pca.sil1
+#| fig-cap: "Silhouette Criteria"
+#| code-fold: true
+# Complete
+complete_HC <- function(x,k){hcut(x, k, hc_method ="complete" , hc_metric="euclidian")}
+
+fviz_nbclust(pr_out_x[, 1:5], complete_HC, method = "silhouette", linecolor="#00BFC4") + ggtitle("Complete Linkage") + theme_bw()
+```
+
+@fig-pca.dendogram shows our results using `K=3` clusters:
+
+```{r}
+nci.pca.complete <- hclust(data_dist, method = "complete")
+```
+
+```{r, fig.align='center', cache=TRUE, message=FALSE, warning=FALSE}
+#| label: fig-pca.dendogram
+#| fig-cap: "Dendogram: Hierarchical Clustering (K=3)"
+#| code-fold: true
+nci.pca.complete %>% fviz_dend(main = "PCA - Complete Linkage", k = 3)
+```
+
+# DSM Lab: Clustering Methods
+
+The following two exercises are based on employment dataset `employment.csv`. This dataset is adapted from the LISS panel (Longitudinal Internet Studies for the Social sciences).
+
+See <https://www.lissdata.nl/about-panel> for a detailed description about LISS. Our dataset contains survey information from 1980 employees in year 2015.
+
+```{r, message=FALSE, warning=FALSE}
+employment <- read_csv("employment.csv")
+employment <- na.omit(employment)
+```
+
+## Sampling & Scaling the Data
+
+### Questions 6-8
+
+We want to group employees based on all the 7 features:
+
+-   Because clustering command involves random assignment of the initial clusters, we use `set.seed(5829)` to keep results replicable.
+
+-   We would like work on a random subset of the original dataset. Use `sample()` to draw 60 random individuals to form the new small dataset.
+
+-   Scale the new data with `scale()`. Think it over: should we scale the data? Why and why not?
+
+```{r}
+set.seed(5829)
+employeesmall <- employment[sample(1:nrow(employment), 60, replace=FALSE),]
+sd.employee <- scale(employeesmall)
+```
+
+## Hierarchical Clustering
+
+### Question 9
+
+We want to perform a hierarchical clustering to get a feeling of how the individuals are clustered. Use `hclust()` and `"average"` linkage to do it.
+
+```{r}
+set.seed(5829)
+hc.average <- hclust(dist(sd.employee),method="average")
+```
+
+### Question 10
+
+Plot the dendrogram.
+
+**If we cut the dendrogram at the height of `3.6`. How many clusters do we get?**
+
+```{r, fig.align='center', cache=TRUE, message=FALSE, warning=FALSE}
+#| label: fig-hc.dendogram1
+#| fig-cap: "Dendogram: Hierarchical Clustering (h = 3.6)"
+#| code-fold: true
+hc.average %>% fviz_dend(main = "Average Linkage", h = 3.6,
+                         rect = TRUE, rect_fill = TRUE) +
+geom_hline(yintercept = 3.6, linetype = 2)
+```
+
+```{r}
+hc.cluster <- cutree(hc.average, h=3.6)
+```
+
+```{r, echo=FALSE}
+cat("Number of Clusters:", max(hc.cluster))
+```
+
+**How many observations are in cluster 3? Which are they?**
+
+```{r}
+# observation 4, 36 and 49 fall into cluster 3
+which(hc.cluster == 3)
+```
+
+```{r, echo=FALSE}
+# 3 observations fall into cluster 3
+cat("Number of Observations in Cluster N°3: ",length(which(hc.cluster == 3)))
+```
+
+### Question 11
+
+Instead of using the Euclidean distance, we now use the *correlation-based distance* to redo the hierarchical clustering.
+
+First use `cor()` to calculate the 60 by 60 correlation matrix of these individuals. Note that correlation measures "similarity" among individuals. You need to transform it into "dissimilarity". The use `as.dist()` to transform dissimilarity matrix into distance matrix. To indicate observations in cluster, you may use `which()`.
+
+```{r}
+dd <- as.dist(1-cor(t(sd.employee)))
+hc.corr <- hclust(dd, method = "average")
+```
+
+Plot the dendrogram. Does the plot change much? If we would like to have 5 clusters?
+
+```{r, fig.align='center', cache=TRUE, message=FALSE, warning=FALSE}
+#| label: fig-hc.dendogram2
+#| fig-cap: "Correlation-Based Distance: Hierarchical Clustering (K = 5)"
+#| code-fold: true
+hc.corr %>% fviz_dend(main = "Average Linkage", k = 5,
+                         rect = TRUE, rect_fill = TRUE)
+```
+
+**How many observations are in cluster 3?**
+
+```{r}
+# we can prune the tree such that we will have 5 branches
+hc.cluster.cor <- cutree(hc.corr, k=5)
+which(hc.cluster.cor == 3)
+```
+
+```{r, echo=FALSE}
+cat("Number of Observations in Cluster N°3: ",length(which(hc.cluster.cor == 3)))
+```
+
+## K-Means Clustering
+
+### Question 12
+
+We now come back to the full sample of 1965 employees. We decide to group them into 3 clusters. Scale the variables and perform a K-means clustering with `kmeans()`. Choose nstart to be 50. Display the total within-cluster sum of squares.
+
+```{r}
+sd.employeefull <- scale(employment)
+km.out <- kmeans(sd.employeefull, 3, nstart=50)
+```
+
+```{r, echo=FALSE}
+cat("Total Within-Cluster Sum of Squares:", round(km.out$tot.withinss,1))
+```
+
+### Question 13
+
+Plot income against tenure. Use different colors for the three groups. Interpret the three groups.
+
+```{r, fig.align='center', cache=TRUE, message=FALSE, warning=FALSE}
+#| label: fig-cluster.f
+#| fig-cap: "K-Means Clustering Results (K = 3)"
+#| code-fold: true
+as.data.frame(sd.employeefull[,2:3]) %>%
+  ggplot(aes(income, tenure, color = as.factor(km.out$cluster))) +
+  geom_point(size = 2, alpha = 0.65) +
+  labs(color = "Cluster") + theme_bw() + ylab("Tenure") + xlab("Income")
+```

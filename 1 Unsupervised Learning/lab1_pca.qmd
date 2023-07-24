@@ -1,0 +1,399 @@
+---
+title: "Principal Components Analysis"
+author: "Daniel Redel"
+toc: true
+format:
+  html:
+    html-math-method: katex
+    code-tools: true
+    self-contained: true
+execute:
+  warning: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls())
+library(ISLR2)
+library(tidyverse)
+library(gtsummary)
+library(kableExtra)
+library(factoextra)
+library(broom)
+library(ggpubr)
+library(readr)
+library(vtable)
+```
+
+# ISLR: US Arrests Data
+
+We will perform PCA on the `USArrests` dataset, which is part of the base `R` package.
+
+## Summary Statistics
+
+```{r}
+us_arrests <- as_tibble(USArrests, rownames = "State")
+head(us_arrests) %>% 
+  kbl() %>%
+  kable_styling() 
+```
+
+```{r}
+us_arrests %>% 
+  select(-State) %>% 
+  tbl_summary(statistic = list(
+    all_continuous() ~ "{mean} ({sd})"),
+    digits = all_continuous() ~ 1)
+```
+
+Notice in @fig-scatterplot1 how the mean of each of the variables is quite different. So, if we were to apply PCA directly to the data set, then `Murder` would have a very small influence compared to `Assault`.
+
+```{r, fig.align='center'}
+#| label: fig-scatterplot1
+#| fig-cap: "Matrix Scatterplot of Murder, Assault, UrbanPop, Rape"
+#| code-fold: true
+pairs(USArrests, col = "blue", pch = 16, main = "Matrix Scatterplot of Murder, Assault, UrbanPop, Rape")
+```
+
+## Principal Components Analysis
+
+We will now perform PCA using the `USArrests` dataset using the function `prcom()`:
+
+```{r}
+pr_out <- prcomp(USArrests, scale = TRUE)
+pr_out$rotation %>% 
+  kbl() %>%
+  kable_styling()
+```
+
+We observe 4 *distinct principal components*, which is be expected because there are in general $\min(n-1,p)$ informative principal components in a data set with $n$ observations and $p$ variables.
+
+Let's extract the data:
+
+```{r}
+scores <- tidy(pr_out, matrix = "scores")
+loadings <- tidy(pr_out, matrix = "loadings")
+```
+
+The loadings tells us how each variable contributes to each Principal Component:
+
+```{r, fig.align='center'}
+tidy(pr_out, matrix = "loadings") %>%
+  ggplot(aes(value, column, fill = as.factor(PC))) +
+  facet_wrap(~ PC) +
+  geom_col() +
+  scale_x_continuous(labels = scales::percent) + 
+  ylab("") + xlab("") +
+  theme_bw() + theme(legend.position="none") 
+```
+
+We can plot the first two principal components as follows:
+
+```{r, fig.align='center'}
+biplot(pr_out, scale = 0)
+```
+
+The `scale = 0` argument to `biplot()` ensures that the arrows are scaled to `biplot()` represent the loadings; other values for scale give slightly different biplots with different interpretations.
+
+We can reproduce Figure 12.1 by making a few small changes:
+
+```{r, fig.align='center'}
+pr_out$rotation <- -pr_out$rotation
+pr_out$x <- -pr_out$x
+biplot(pr_out, scale = 0)
+```
+
+Alternatively, we can use the biplot function from the `factoextra` package:
+
+```{r, fig.align='center'}
+fviz_pca_biplot(pr_out, repel = TRUE,
+                col.var = "#2E9FDF", # Variables color
+                col.ind = "#696969"  # Individuals color
+                )
+```
+
+## Variance & Screeplot
+
+**How much of the variance in the data is not contained in the first few principal components?**
+
+First, we can compute the **Variance Explained by each principal component** from the standard deviation returned by:
+
+$$
+\frac{
+\text{Var}(Z_m)
+}{
+\sum^{ p}_{j=1}\text{Var}(X_j)
+}=\frac{\sum^n_{i=1}\left(\sum^{ p}_{j=1}\phi_{jm}x_{ij} \right)^2}{{\sum^p_{j=1}\sum^n_{i=1}x_{ij}^2}}
+$$
+
+```{r}
+pr_var <- pr_out$sdev ^2
+pve <- pr_var/sum(pr_var)
+```
+
+```{r, echo=FALSE}
+cat("PVE:", round(pve,2))
+```
+
+Let's plot the **Proportion of variance explained (PVE)**:
+
+```{r, include=FALSE}
+plot(pve, xlab = "Principal Component", ylab = "Proportion of Variance Explained ", ylim = c(0, 1), type = "b")
+```
+
+```{r, fig.align='center'}
+tidy(pr_out, matrix = "eigenvalues") %>%
+  ggplot(aes(PC, percent)) +
+  geom_col() + 
+  labs(x = "Principal Component", y = "Proportion of Variance Explained") + 
+  theme_bw()
+```
+
+The `factoextra` package also gives us a way to make a **screeplot**:
+
+```{r, fig.align='center'}
+fviz_eig(pr_out)
+```
+
+**Cumulative Proportion of Variance Explained**:
+
+```{r, include=FALSE}
+plot(cumsum(pve), xlab = "Principal Component ", ylab = "Cumulative Proportion of Variance Explained", ylim = c(0, 1), type = "b")
+```
+
+```{r, fig.align='center'}
+tidy(pr_out, matrix = "eigenvalues") %>%
+  ggplot(aes(PC, cumulative)) +
+  geom_line() + geom_point() +
+  labs(x = "Principal Component", y = "Cumulative Proportion of Variance Explained") + 
+  theme_bw()
+```
+
+# ISLR: NCI60 Cancer Data
+
+We will now explore the `NCI60` data set. It is genomic data set, containing cancer cell line microarray data, which consists of 6,830 gene expression measurements on 64 cancer cell lines:
+
+```{r, echo=FALSE}
+cat("Dimensions:", dim(NCI60$data)[1], "Observations and", dim(NCI60$data)[2], "Variables")
+```
+
+## PCA on the NCI60 Data
+
+We use [`prcomp()`](http://bit.ly/R_prcomp) to run principal component analysis as shown in the PCA exercise above.
+
+```{r}
+data.frame(NCI60$data)
+labs <- as.factor(NCI60$labs)
+```
+
+```{r}
+pr_out <- prcomp(NCI60$data, scale = TRUE)
+pr_out_x <- pr_out$x %>% as_tibble(rownames = "Variable")
+```
+
+```{r, echo=FALSE}
+pr_out_x[1:9, 1:9] %>% 
+  kbl() %>%
+  kable_styling()
+```
+
+Here we will just compare the pairs PCA1-PCA2 and PCA1-PCA3:
+
+```{r}
+#| code-fold: true
+colors <- unname(palette.colors(n = 14, palette = "Polychrome 36"))
+labs <- as.factor(NCI60$labs)
+
+biplot1 <- pr_out_x %>%
+  ggplot(aes(PC1, PC2, color = labs)) +
+  geom_point(size = 2) +
+  scale_color_manual(values = colors) + theme_bw()
+biplot2 <- pr_out_x %>%
+  ggplot(aes(PC1, PC3, color = labs)) +
+  geom_point(size = 2) +
+  scale_color_manual(values = colors) + theme_bw()
+biplot3 <- pr_out_x %>%
+  ggplot(aes(PC1, PC4, color = labs)) +
+  geom_point(size = 2) +
+  scale_color_manual(values = colors) + theme_bw()
+biplot4 <- pr_out_x %>%
+  ggplot(aes(PC3, PC4, color = labs)) +
+  geom_point(size = 2) +
+  scale_color_manual(values = colors) + theme_bw()
+```
+
+```{r, fig.align='center', echo=FALSE}
+ggarrange(biplot1, biplot2, biplot3, biplot4,
+          common.legend = TRUE, legend = "right")
+```
+
+## Screeplot
+
+Lastly, we will plot the variance explained of each principal component. We can use [`tidy()`](https://generics.r-lib.org/reference/tidy.html) with `matrix = "eigenvalues"` to accomplish this easily, so we start with the percentage of each PC
+
+```{r}
+pve_plot <- tidy(pr_out, matrix = "eigenvalues") %>%
+  ggplot(aes(PC, percent)) +
+  geom_line(colour = "blue") + 
+  geom_point(size = 3, colour = "blue", shape = 1) +
+  scale_x_continuous(breaks = seq(0, 60, by = 5)) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(x = "Principal Component", y = "PVE") + theme_bw()
+```
+
+And we can get the cumulative variance explained just the same.
+
+```{r}
+cumpve_plot <- tidy(pr_out, matrix = "eigenvalues") %>%
+  ggplot(aes(PC, cumulative)) +
+  geom_line(colour = "darkred") + 
+  geom_point(size = 3, colour = "darkred", shape = 1) +
+  labs(x = "Principal Component", y = "Cumulative PVE") + theme_bw()
+```
+
+```{r, echo=FALSE, , fig.align='center'}
+#| label: fig-pve1
+#| fig-cap: "Proportion of Variance Explained"
+#| code-fold: true
+ggarrange(pve_plot, cumpve_plot , 
+          ncol = 2, nrow = 2)
+```
+
+We see in @fig-pve1 that together, the 7 seven principal components explain around 40% of the variance in the data. This is not a huge amount of the variance.
+
+We also see that there is a marked decrease in the variance explained by further principal components. That is, there is an elbow in the plot after approximately the seventh principal component. This suggests that *there may be little benefit to examining more than 7 or so principal components*.
+
+# DSM Lab: Principal Components Analysis
+
+The following two exercises are based on employment dataset `employment.csv`. This dataset is adapted from the LISS panel (Longitudinal Internet Studies for the Social sciences).
+
+See <https://www.lissdata.nl/about-panel> for a detailed description about LISS. Our dataset contains survey information from 1980 employees in year 2015.
+
+```{r, message=FALSE, warning=FALSE}
+employment <- read_csv("employment.csv")
+```
+
+### Question 1
+
+Read the data. Are there missing values in any variable? If yes, drop observations with missing value.
+
+We found 15 missing values on the `jobsatisfaction` variable:
+
+```{r}
+head(employment[is.na(employment$jobsatisfaction),]) %>% 
+  kbl() %>%
+  kable_styling() 
+```
+
+```{r}
+employment <- na.omit(employment)
+```
+
+### Question 2
+
+Produce some descriptive statistics (mean, standard deviation, min, max etc.) to get a feeling of the data.
+
+```{r}
+sumtable(employment, 
+         summ=c('mean(x)', 'sd(x)', 'min(x)', 'max(x)'), 
+         out = 'return') %>% 
+  kbl() %>%
+  kable_styling() 
+```
+
+@fig-scatterplot shows visually the relationship between the variables:
+
+```{r, fig.align='center', cache=TRUE}
+#| label: fig-scatterplot
+#| fig-cap: "Scatterplot"
+#| code-fold: true
+pairs(employment, col = "blue", pch = 16, main = "Matrix Scatterplot")
+```
+
+### Question 3
+
+Perform a principal components analysis using variables "income", "tenure", "training", "jobsatisfaction", "female". ***What if we do not standardize the variables?***
+
+Compare the loading vectors in *two cases* and explain why they differ. Which method do you prefer?
+
+```{r}
+pca_std <- prcomp(employment[,c(-1,-6)], scale = TRUE)
+pca_std$rotation %>% 
+  kbl() %>%
+  kable_styling()
+```
+
+Let's run it again but without re-scaling the variables:
+
+```{r}
+pca_unstd <- prcomp(employment[,c(-1,-6)], scale = FALSE)
+pca_unstd$rotation %>% 
+  kbl() %>%
+  kable_styling()
+```
+
+If not standardizing variables, those with larger variance (e.g. income and tenure) will automatically get the largest weights. The standardized method is preferred.
+
+@fig-loadings plots the loadings for each Principal Component:
+
+```{r, fig.align='center'}
+#| label: fig-loadings
+#| fig-cap: "PCA Loadings"
+#| code-fold: true
+tidy(pca_std, matrix = "loadings") %>%
+  ggplot(aes(value, column, fill = as.factor(PC))) +
+  facet_wrap(~ PC) +
+  geom_col() +
+  scale_x_continuous(labels = scales::percent) + 
+  ylab("") + xlab("") +
+  theme_bw() + theme(legend.position="none") 
+```
+
+### Question 4
+
+We focus on the PCA with standardized variables. Use `biplot()` to plot the first two PCs. Note that R will automatically use labels for observations, which is not ideal.
+
+Give interpretations based on the loading vectors and the plot.
+
+```{r, fig.align='center', cache=TRUE}
+#| label: fig-biplot
+#| fig-cap: "Biplot"
+#| code-fold: true
+fviz_pca_biplot(pca_std, repel = TRUE, geom="point",
+                col.var = "black",
+                col.ind = "blue",
+                alpha = 0.65) + 
+  labs(title ="PCA - Biplot", x = "PC1", y = "PC2")
+```
+
+### Question 5
+
+Produce a scree plot of PVE and a scree plot of cumulated PVE to determine how many PCs to keep. Motivate your choice.
+
+```{r}
+pr_var <- pca_std$sdev ^2
+pve <- pr_var/sum(pr_var)
+```
+
+```{r, fig.align='center', cache=TRUE}
+#| label: fig-pve
+#| fig-cap: "PVE"
+#| code-fold: true
+tidy(pca_std, matrix = "eigenvalues") %>%
+  ggplot(aes(PC, percent)) +
+  geom_line(colour = "blue") + 
+  geom_point(size = 3, colour = "blue", shape = 1) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(x = "Principal Component", y = "PVE") + theme_bw()
+```
+
+```{r, fig.align='center', cache=TRUE}
+#| label: fig-cumpve
+#| fig-cap: "CUM PVE"
+#| code-fold: true
+tidy(pca_std, matrix = "eigenvalues") %>%
+  ggplot(aes(PC, cumulative)) +
+  geom_line(colour = "darkred") + 
+  geom_point(size = 3, colour = "darkred", shape = 1) +
+  labs(x = "Principal Component", y = "Cumulative PVE") + theme_bw()
+```
