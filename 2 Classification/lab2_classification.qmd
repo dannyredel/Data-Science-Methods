@@ -1,0 +1,1026 @@
+---
+title: "Classification"
+author: "Daniel Redel"
+toc: true
+format:
+  html:
+    html-math-method: katex
+    code-tools: true
+    self-contained: true
+execute:
+  warning: false
+---
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls())
+library(ISLR2)
+library(tidyverse)
+library(gtsummary)
+library(kableExtra)
+library(factoextra)
+library(discrim)
+library(corrplot)
+library(modelsummary)
+library(yardstick)
+library(caret)
+library(MASS)
+library(class)
+library(e1071)
+
+library(broom)
+library(ggpubr)
+library(fpc)
+```
+
+# ISLR: The Stock Market Data
+
+## Summary Statistics
+
+We will begin by doing some descriptive analysis of the `Smarket` data, which is part of the `ISLR2` library. This data set consists of percentage returns for the S&P 500 stock index over 1,250 days, from the beginning of 2001 until the end of 2005.
+
+-   For each date, we have recorded the percentage returns for each of the five previous trading days, `Lag1` through `Lag5`.
+
+-   It also contain a variable called `Direction` which has the two labels `"Up"` and `"Down"`.
+
+```{r}
+Smarket <- Smarket %>% 
+  rownames_to_column(var = "day") %>% 
+  as_tibble()
+```
+
+```{r, echo=FALSE}
+#| label: tbl-dataset1
+#| tbl-cap: "Stock Market Data"
+head(Smarket) %>% 
+  kbl() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+```{r, cache=TRUE}
+#| label: tbl-summary1
+#| tbl-cap: "Summary Statistics"
+Smarket %>% 
+  select(-day, -Year) %>% 
+  tbl_summary(by = Direction, statistic = list(
+    all_continuous() ~ "{mean} ({sd})"),
+    digits = all_continuous() ~ 3)
+```
+
+Let us take a look at the correlation between the variables:
+
+```{r}
+correlation <- round(cor(Smarket[,2:9]),2)
+```
+
+```{r, fig.align='center'}
+#| label: fig-heatmap1
+#| fig-cap: "Correlation Matrix between Covariates"
+#| code-fold: true
+corrplot(correlation, type = 'lower', method="color", 
+         tl.col = 'black', tl.srt = 45, # text label
+         addCoef.col = "black", # coefficients
+         col = COL2('BrBG'), diag=FALSE)
+```
+
+We see some positive correlation between `Year` and `Volume`. @fig-volume confirms the upward trend between these two variables:
+
+```{r, fig.align='center'}
+#| label: fig-volume
+#| fig-cap: "Time-Trend of Volume"
+#| code-fold: true
+Smarket %>% 
+  ggplot(aes(Year, Volume)) +
+  geom_jitter(width = 0.25, color = "#2D8E6F", size = 2, alpha = 0.6) +
+  geom_smooth(method = lm, formula = y ~ splines::bs(x, 3), se = FALSE, color = "#E6AA68", alpha = 0.7) +
+  theme_bw()
+```
+
+## Logistic Regression
+
+Next, we will fit a logistic regression model in order to predict `Direction` using `Lag1` through `Lag5` and `Volume`:
+
+```{r}
+Smarket <- Smarket %>%
+mutate(Direction1 = ifelse(Direction == "Down",0,1))
+```
+
+```{r}
+glm.fit <- glm(Direction ~ Lag1 + Lag2 + Lag3 + Lag4 + Lag5 + Volume, data = Smarket, family = binomial(link="logit"))
+```
+
+```{r, cache=TRUE}
+#| label: tbl-logit1
+#| tbl-cap: "Logistic Regression Results"
+#| code-fold: true
+summary(glm.fit)$coef %>% 
+  round(3) %>% 
+  kbl() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+### Prediction
+
+Predictions are done much the same way. Here we use the model to predict on the data it was trained on.
+
+```{r}
+# Predicted x'beta
+xb <- predict(glm.fit, type = "link", newdata = Smarket)
+# Predicted probability 
+prob <- predict(glm.fit, type = "response", newdata = Smarket)
+```
+
+```{r}
+head(cbind(xb,prob)) %>% 
+  round(3) %>% 
+  kbl() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+We can build a **confusion matrix** to assess prediction accuracy:
+
+```{r}
+pred_Smarket <- cbind(Smarket, xb, prob)
+pred_Smarket$Prediction <- rep("Down", 1250)
+pred_Smarket$Prediction[prob > 0.5] <- "Up"
+```
+
+```{r}
+pred_Smarket %>% 
+  mutate(Prediction = as.factor(Prediction)) %>% 
+  conf_mat(truth = Direction, estimate = Prediction)
+```
+
+Alternatively, the package `yardstick` provides some useful functions to evaluate model performance. For example, we can get the `acuracy()`:
+
+```{r}
+#| code-fold: true
+pred_Smarket %>%
+  mutate(Prediction = as.factor(Prediction)) %>% 
+  accuracy(truth = Direction, estimate = Prediction) %>% 
+  kbl() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+**What is the percentage of negatives (in this case, `Direction=Up`) correctly identified?** That is defined by the *Specificity* metric:
+
+```{r}
+#| code-fold: true
+pred_Smarket %>%
+  mutate(Prediction = as.factor(Prediction)) %>% 
+  spec(truth = Direction, estimate = Prediction) %>% 
+  kbl() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+We can use the `confusionMatrix()` function from the `caret` package to have a more detailed assessment:
+
+```{r}
+cm <- confusionMatrix(factor(pred_Smarket$Prediction), 
+                      factor(pred_Smarket$Direction), 
+                      dnn = c("Prediction", "Direction"))
+cm
+```
+
+A more visual representation of the confusion matrix can be done by generating a `ggplot2` chart:
+
+```{r}
+plt <- as.data.frame(cm$table)
+
+plotTable <- plt %>%
+  mutate(Correct = ifelse(plt$Prediction == plt$Direction, "TRUE", "FALSE")) %>%
+  group_by(Direction) %>%
+  mutate(prop = Freq/sum(Freq))
+```
+
+```{r, fig.align='center'}
+#| label: fig-confusionmatrix1
+#| fig-cap: "Confusion Matrix: Logistic Regression"
+#| code-fold: true
+ggplot(plotTable, aes(x = Direction, y = Prediction, fill = Correct, alpha = prop)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), vjust = .5, fontface  = "bold", alpha = 1) +
+  scale_fill_manual(values = c("TRUE" = "#8F95D3", "FALSE" = "#DBB1BC")) +
+  theme_bw() +
+  xlim(rev(levels(plt$Direction)))
+```
+
+### Out-Of-Sample Performance
+
+We have just said something about the *training error rate*. As we have seen previously, the training error rate is often overly optimistic---it tends to underestimate the **test error rate**.
+
+In order to better assess the accuracy of the logistic regression model in this setting, we can fit the model using part of the data, and then examine how well it predicts the *held out data*.
+
+Since we are working with some data that has a time component, it is natural to fit the model using the observations form `2001` to `2004` and evaluate it on the last year of `2005`. This would more closely match how such a model would be used in real life:
+
+```{r}
+Smarket_train <- Smarket %>% 
+  filter(Year <= 2004)
+Smarket_test <- Smarket %>% 
+  filter(Year == 2005)
+```
+
+```{r}
+glm_fit <- glm(Direction ~ Lag1 + Lag2 + Lag3 + Lag4 + Lag5 + Volume,
+               data = Smarket_train,
+               family = binomial)
+```
+
+Predicting using the test data:
+
+```{r}
+prob <- predict(glm_fit, type = "response", newdata = Smarket_test)
+pred_Smarket_test <- cbind(Smarket_test, prob)
+pred_Smarket_test$Prediction <- rep("Down", nrow(Smarket_test))
+pred_Smarket_test$Prediction[prob > 0.5] <- "Up"
+```
+
+```{r}
+confusion_test1 <- table(Prediction = factor(pred_Smarket_test$Prediction), 
+      Direction = factor(pred_Smarket_test$Direction))
+```
+
+```{r, echo=FALSE}
+cat("Accuracy:", round((confusion_test1[1,1]+confusion_test1[2,2])/nrow(Smarket_test),3))
+```
+
+The results are rather disappointing: the accuracy is 48%, which is worse than random guessing!
+
+Perhaps by removing the variables that appear not to be helpful in predicting Direction, we can obtain a more effective model.
+
+```{r}
+glm_fit_minimal <- glm(Direction ~ Lag1 + Lag2, data = Smarket_train,
+                       family = binomial)
+```
+
+```{r}
+prob <- predict(glm_fit_minimal, type = "response", newdata = Smarket_test)
+pred_Smarket_test <- cbind(Smarket_test, prob)
+pred_Smarket_test$Prediction <- rep("Down", nrow(Smarket_test))
+pred_Smarket_test$Prediction[prob > 0.5] <- "Up"
+```
+
+```{r}
+confusion_test2 <- table(Prediction = factor(pred_Smarket_test$Prediction), 
+      Direction = factor(pred_Smarket_test$Direction))
+```
+
+```{r, echo=FALSE}
+cat("Accuracy:", round((confusion_test2[1,1]+confusion_test2[2,2])/nrow(Smarket_test),3))
+```
+
+The confusion matrix shows that when logistic regression predicts an increase in the market, it has a 56% accuracy rate. These results are a little bit better.
+
+## Linear Discriminant Analysis
+
+```{r}
+lda.fit <- MASS::lda(Direction ~ Lag1 + Lag2, data = Smarket_train)
+plot(lda.fit)
+```
+
+Predictions are done using the test data:
+
+```{r}
+prediction_lda <- predict(lda.fit, newdata = Smarket_test)
+lda_Smarket <- cbind(Smarket_test, Prediction = prediction_lda$class)
+```
+
+```{r}
+lda_Smarket  %>% 
+  mutate(Prediction = as.factor(Prediction)) %>% 
+  conf_mat(truth = Direction, estimate = Prediction)
+```
+
+```{r}
+#| code-fold: true
+cm <- confusionMatrix(factor(lda_Smarket$Prediction), 
+                      factor(lda_Smarket$Direction), 
+                      dnn = c("Prediction", "Direction"))
+plt <- as.data.frame(cm$table)
+plotTable <- plt %>%
+  mutate(Correct = ifelse(plt$Prediction == plt$Direction, "TRUE", "FALSE")) %>%
+  group_by(Direction) %>%
+  mutate(prop = Freq/sum(Freq))
+```
+
+```{r, fig.align='center'}
+#| label: fig-confusionmatrix2
+#| fig-cap: "Confusion Matrix: Linear Discriminant Analysis"
+#| code-fold: true
+ggplot(plotTable, aes(x = Direction, y = Prediction, fill = Correct, alpha = prop)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), vjust = .5, fontface  = "bold", alpha = 1) +
+  scale_fill_manual(values = c("TRUE" = "#8F95D3", "FALSE" = "#DBB1BC")) +
+  theme_bw() +
+  xlim(rev(levels(plt$Direction)))
+```
+
+```{r, echo=FALSE}
+cat("Accuracy:", round((106+35)/nrow(Smarket_test),3))
+```
+
+Applying a 50% threshold to the posterior probabilities allows us to recreate the predictions contained in `lda.pred$class`.
+
+```{r}
+sum(prediction_lda$posterior[, 1] >= 0.5)
+sum(prediction_lda$posterior[, 1] < 0.5)
+```
+
+## Quadratic Discriminant Analysis
+
+We will now fit a QDA model:
+
+```{r}
+qda.fit <- MASS::qda(Direction ~ Lag1 + Lag2, data = Smarket_train)
+```
+
+```{r}
+prediction_qda <- predict(qda.fit, newdata = Smarket_test)
+qda_Smarket <- cbind(Smarket_test, Prediction = prediction_qda$class)
+```
+
+```{r}
+#| code-fold: true
+cm <- confusionMatrix(factor(qda_Smarket$Prediction), 
+                      factor(qda_Smarket$Direction), 
+                      dnn = c("Prediction", "Direction"))
+plt <- as.data.frame(cm$table)
+plotTable <- plt %>%
+  mutate(Correct = ifelse(plt$Prediction == plt$Direction, "TRUE", "FALSE")) %>%
+  group_by(Direction) %>%
+  mutate(prop = Freq/sum(Freq))
+```
+
+```{r, fig.align='center'}
+#| label: fig-confusionmatrix3
+#| fig-cap: "Confusion Matrix: Quadratic Discriminant Analysis"
+#| code-fold: true
+ggplot(plotTable, aes(x = Direction, y = Prediction, fill = Correct, alpha = prop)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), vjust = .5, fontface  = "bold", alpha = 1) +
+  scale_fill_manual(values = c("TRUE" = "#8F95D3", "FALSE" = "#DBB1BC")) +
+  theme_bw() +
+  xlim(rev(levels(plt$Direction)))
+```
+
+```{r, echo=FALSE}
+cat("Accuracy:", round((121+30)/nrow(Smarket_test),3))
+```
+
+## Naive Bayes
+
+Next, we fit a naive Bayes model to the `Smarket` data. Naive Bayes is implemented in `R` using the `naiveBayes()` function, which is part of the `e1071` library.
+
+```{r}
+nbayes.fit <- naiveBayes(Direction ~ Lag1 + Lag2, data = Smarket_train)
+```
+
+```{r}
+prediction_nbayes <- predict(nbayes.fit , newdata = Smarket_test)
+nbayes_Smarket <- cbind(Smarket_test, Prediction = prediction_nbayes)
+```
+
+```{r}
+#| code-fold: true
+cm <- confusionMatrix(factor(nbayes_Smarket$Prediction), 
+                      factor(nbayes_Smarket$Direction), 
+                      dnn = c("Prediction", "Direction"))
+plt <- as.data.frame(cm$table)
+plotTable <- plt %>%
+  mutate(Correct = ifelse(plt$Prediction == plt$Direction, "TRUE", "FALSE")) %>%
+  group_by(Direction) %>%
+  mutate(prop = Freq/sum(Freq))
+```
+
+```{r, fig.align='center'}
+#| label: fig-confusionmatrix31
+#| fig-cap: "Confusion Matrix: Quadratic Discriminant Analysis"
+#| code-fold: true
+ggplot(plotTable, aes(x = Direction, y = Prediction, fill = Correct, alpha = prop)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), vjust = .5, fontface  = "bold", alpha = 1) +
+  scale_fill_manual(values = c("TRUE" = "#8F95D3", "FALSE" = "#DBB1BC")) +
+  theme_bw() +
+  xlim(rev(levels(plt$Direction)))
+```
+
+```{r, echo=FALSE}
+cat("Accuracy:", round((121+28)/nrow(Smarket_test),3))
+```
+
+The accuracy of the Naive Bayes is very similar to that of the QDA model. This seems reasonable since the below scatter plot shows that there is no apparent relationship between `Lag1` vs `Lag2` and thus the Naive Bayes' assumption of independently distributed predictors is not unreasonable.
+
+## K-Nearest Neighbors
+
+We will now perform KNN using the `knn()` function, which is part of the `class` library. First we need to re-arrange our train and test data:
+
+```{r}
+train_x <-  Smarket_train %>% 
+  dplyr::select(Lag1, Lag2)
+
+test_x <- Smarket_test %>% 
+  dplyr::select(Lag1, Lag2)
+
+train_y <- Smarket_train %>% 
+  dplyr::select(Direction)
+```
+
+We initialize the random number generator with [set.seed()](http://bit.ly/R_set_seed) to ensure that repeated runs produce consistent results and then use [`knn()`](http://bit.ly/R_knn) to make predictions about the market direction in 2005. I have set it to 3 with `neighbors = 3`.
+
+```{r}
+set.seed(1)
+knn_pred <- knn(as.matrix(train_x),
+                as.matrix(test_x),
+                as.matrix(train_y),
+                k = 3)
+```
+
+```{r}
+table(knn_pred, Smarket_test[["Direction"]])
+```
+
+```{r, echo=FALSE}
+cat("Accuracy:", round((48+86)/nrow(Smarket_test),3))
+```
+
+It appears that this model is not performing that well.
+
+# ISLR: `Weekly` Stock Data
+
+This question should be answered using the `Weekly` data set, which is part of the ISLR2 package. This data is similar in nature to the `Smarket` data, except that it contains 1,089 weekly returns for 21 years, from the beginning of 1990 to the end of 2010.
+
+## Summary Statistics
+
+### Question (a)
+
+Produce some numerical and graphical summaries of the `Weekly` data. Do there appear to be any patterns?
+
+```{r}
+Weekly <- Weekly %>% 
+  rownames_to_column(var = "day") %>% 
+  as_tibble()
+```
+
+```{r}
+Weekly %>% 
+  dplyr::select(-day, -Year) %>% 
+  tbl_summary(by = Direction, statistic = list(
+    all_continuous() ~ "{mean} ({sd})"),
+    digits = all_continuous() ~ 3)
+```
+
+Let us take a look at the correlation between the variables:
+
+```{r}
+correlation <- round(cor(Weekly[,2:9]),2)
+```
+
+```{r, fig.align='center'}
+#| label: fig-heatmap2
+#| fig-cap: "Correlation Matrix between Covariates"
+#| code-fold: true
+corrplot(correlation, type = 'lower', method="color", 
+         tl.col = 'black', tl.srt = 45, # text label
+         addCoef.col = "black", # coefficients
+         col = COL2('BrBG'), diag=FALSE)
+```
+
+The variable `Volume` tends to increase in time. @fig-volume2 confirms this upward trend:
+
+```{r, fig.align='center'}
+#| label: fig-volume2
+#| fig-cap: "Time-Trend of Volume"
+#| code-fold: true
+Weekly %>% 
+  ggplot(aes(Year, Volume)) +
+  geom_jitter(width = 0.25, color = "#2D8E6F", size = 2, alpha = 0.6) +
+  geom_smooth(method = lm, formula = y ~ splines::bs(x, 3), se = FALSE, color = "#E6AA68", alpha = 0.7) +
+  theme_bw()
+```
+
+## Logistic Regression
+
+### Question (b)
+
+Use the full data set to perform a logistic regression with `Direction` as the response and the five lag variables plus `Volume` as predictors. Use the summary function to print the results. Do any of the predictors appear to be statistically significant? If so, which ones?
+
+```{r}
+glm.fit <- glm(Direction ~ Lag1 + Lag2 + Lag3 + Lag4 + Lag5 + Volume, data = Weekly, family = binomial(link="logit"))
+```
+
+```{r}
+summary(glm.fit)$coef %>% 
+  round(3) %>% 
+  kbl() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+The variable `Lag2` appears to have some statistical significance with 3% of significance.
+
+### Question (c)
+
+Compute the **confusion matrix** and overall fraction of correct predictions. Explain what the confusion matrix is telling you about the types of mistakes made by logistic regression.
+
+```{r}
+# Predicted x'beta
+xb <- predict(glm.fit, type = "link", newdata = Weekly)
+# Predicted probability 
+prob <- predict(glm.fit, type = "response", newdata = Weekly)
+```
+
+```{r}
+pred_Weekly <- cbind(Weekly, xb, prob)
+pred_Weekly$Prediction <- rep("Down", 1089)
+pred_Weekly$Prediction[prob > 0.5] <- "Up"
+```
+
+```{r}
+cm <- confusionMatrix(factor(pred_Weekly$Prediction), 
+                      factor(pred_Weekly$Direction), 
+                      dnn = c("Prediction", "Direction"))
+```
+
+Let's build our confusion matrix in a visual way:
+
+```{r}
+plt <- as.data.frame(cm$table)
+
+plotTable <- plt %>%
+  mutate(Correct = ifelse(plt$Prediction == plt$Direction, "TRUE", "FALSE")) %>%
+  group_by(Direction) %>%
+  mutate(prop = Freq/sum(Freq))
+```
+
+```{r, fig.align='center'}
+#| label: fig-confusionmatrix21
+#| fig-cap: "Confusion Matrix: Logistic Regression"
+#| code-fold: true
+ggplot(plotTable, aes(x = Direction, y = Prediction, fill = Correct, alpha = prop)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), vjust = .5, fontface  = "bold", alpha = 1) +
+  scale_fill_manual(values = c("TRUE" = "#8F95D3", "FALSE" = "#DBB1BC")) +
+  theme_bw() +
+  xlim(rev(levels(plt$Direction)))
+```
+
+**Accuracy**:
+
+```{r, echo=FALSE}
+round(cm$overall[1],3)
+```
+
+### Question (d)
+
+Now fit the logistic regression model using a training data period *from 1990 to 2008*, with `Lag2` as the only predictor. Compute the confusion matrix and the overall fraction of correct predictions for the held out data (that is, the data from 2009 and 2010).
+
+```{r}
+Weekly_train <- Weekly %>% 
+  filter(Year <= 2008)
+Weekly_test <- Weekly %>% 
+  filter(Year > 2008)
+```
+
+```{r}
+glm_fit <- glm(Direction ~ Lag2,
+               data = Weekly_train,
+               family = binomial)
+```
+
+```{r}
+prob <- predict(glm_fit, type = "response", newdata = Weekly_test)
+pred_Weekly_test <- cbind(Weekly_test, prob)
+pred_Weekly_test$Prediction <- rep("Down", nrow(Weekly_test))
+pred_Weekly_test$Prediction[prob > 0.5] <- "Up"
+```
+
+```{r}
+#| code-fold: true
+cm <- confusionMatrix(factor(pred_Weekly_test$Prediction), 
+                      factor(pred_Weekly_test$Direction), 
+                      dnn = c("Prediction", "Direction"))
+
+plt <- as.data.frame(cm$table)
+
+plotTable <- plt %>%
+  mutate(Correct = ifelse(plt$Prediction == plt$Direction, "TRUE", "FALSE")) %>%
+  group_by(Direction) %>%
+  mutate(prop = Freq/sum(Freq))
+```
+
+```{r, fig.align='center'}
+#| label: fig-confusionmatrix22
+#| fig-cap: "Confusion Matrix on Test Data: Logistic Regression"
+#| code-fold: true
+ggplot(plotTable, aes(x = Direction, y = Prediction, fill = Correct, alpha = prop)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), vjust = .5, fontface  = "bold", alpha = 1) +
+  scale_fill_manual(values = c("TRUE" = "#8F95D3", "FALSE" = "#DBB1BC")) +
+  theme_bw() +
+  xlim(rev(levels(plt$Direction)))
+```
+
+```{r, echo=FALSE}
+round(cm$overall[1],3)
+```
+
+## LDA, QDA, KNN & Naive Bayes
+
+### Question (e) to (h)
+
+**LDA:**
+
+```{r}
+lda.fit <- MASS::lda(Direction ~ Lag2, data = Weekly_train)
+plot(lda.fit)
+```
+
+Predictions are done using the test data:
+
+```{r}
+prediction_lda <- predict(lda.fit, newdata = Weekly_test)
+lda_Weekly <- cbind(Weekly_test, Prediction = prediction_lda$class)
+```
+
+```{r}
+#| code-fold: true
+cm <- confusionMatrix(factor(lda_Weekly$Prediction), 
+                      factor(lda_Weekly$Direction), 
+                      dnn = c("Prediction", "Direction"))
+plt <- as.data.frame(cm$table)
+plotTable <- plt %>%
+  mutate(Correct = ifelse(plt$Prediction == plt$Direction, "TRUE", "FALSE")) %>%
+  group_by(Direction) %>%
+  mutate(prop = Freq/sum(Freq))
+```
+
+```{r, fig.align='center'}
+#| label: fig-confusionmatrix233
+#| fig-cap: "Confusion Matrix: Linear Discriminant Analysis"
+#| code-fold: true
+ggplot(plotTable, aes(x = Direction, y = Prediction, fill = Correct, alpha = prop)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), vjust = .5, fontface  = "bold", alpha = 1) +
+  scale_fill_manual(values = c("TRUE" = "#8F95D3", "FALSE" = "#DBB1BC")) +
+  theme_bw() +
+  xlim(rev(levels(plt$Direction)))
+```
+
+```{r, echo=FALSE}
+cat("Accuracy:", round(cm$overall[1],3))
+```
+
+**QDA**:
+
+We will now fit a QDA model:
+
+```{r}
+qda.fit <- MASS::qda(Direction ~ Lag2, data = Weekly_train)
+```
+
+```{r}
+prediction_qda <- predict(qda.fit, newdata = Weekly_test)
+qda_Weekly <- cbind(Weekly_test, Prediction = prediction_qda$class)
+```
+
+```{r, warning=FALSE}
+#| code-fold: true
+cm <- confusionMatrix(factor(qda_Weekly$Prediction), 
+                      factor(qda_Weekly$Direction), 
+                      dnn = c("Prediction", "Direction"))
+plt <- as.data.frame(cm$table)
+plotTable <- plt %>%
+  mutate(Correct = ifelse(plt$Prediction == plt$Direction, "TRUE", "FALSE")) %>%
+  group_by(Direction) %>%
+  mutate(prop = Freq/sum(Freq))
+```
+
+```{r, fig.align='center'}
+#| label: fig-confusionmatrix42
+#| fig-cap: "Confusion Matrix: Quadratic Discriminant Analysis"
+#| code-fold: true
+ggplot(plotTable, aes(x = Direction, y = Prediction, fill = Correct, alpha = prop)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), vjust = .5, fontface  = "bold", alpha = 1) +
+  scale_fill_manual(values = c("TRUE" = "#8F95D3", "FALSE" = "#DBB1BC")) +
+  theme_bw() +
+  xlim(rev(levels(plt$Direction)))
+```
+
+```{r, echo=FALSE}
+cat("Accuracy:", round(cm$overall[1],3))
+```
+
+**KNN** (`k=1`):
+
+We will now perform KNN using the `knn()` function, which is part of the `class` library. First we need to re-arrange our train and test data:
+
+```{r}
+train_x <-  Weekly_train %>% 
+  dplyr::select(Lag2)
+
+test_x <- Weekly_test %>% 
+  dplyr::select(Lag2)
+
+train_y <- Weekly_train %>% 
+  dplyr::select(Direction)
+```
+
+We initialize the random number generator with [set.seed()](http://bit.ly/R_set_seed) to ensure that repeated runs produce consistent results and then use [`knn()`](http://bit.ly/R_knn) to make predictions about the market direction in 2005. I have set it to 3 with `neighbors = 3`.
+
+```{r}
+set.seed(1)
+knn_pred <- knn(as.matrix(train_x),
+                as.matrix(test_x),
+                as.matrix(train_y),
+                k = 1)
+```
+
+```{r}
+table(knn_pred, Weekly_test[["Direction"]])
+```
+
+```{r, echo=FALSE}
+cat("Accuracy:", round((21+31)/nrow(Weekly_test),3))
+```
+
+It appears that this model is not performing that well.
+
+**Naive Bayes**:
+
+```{r}
+nbayes.fit <- naiveBayes(Direction ~ Lag2, data = Weekly_train)
+```
+
+```{r}
+prediction_nbayes <- predict(nbayes.fit , newdata = Weekly_test)
+nbayes_Weekly <- cbind(Weekly_test, Prediction = prediction_nbayes)
+```
+
+```{r}
+#| code-fold: true
+cm <- confusionMatrix(factor(nbayes_Weekly$Prediction), 
+                      factor(nbayes_Weekly$Direction), 
+                      dnn = c("Prediction", "Direction"))
+plt <- as.data.frame(cm$table)
+plotTable <- plt %>%
+  mutate(Correct = ifelse(plt$Prediction == plt$Direction, "TRUE", "FALSE")) %>%
+  group_by(Direction) %>%
+  mutate(prop = Freq/sum(Freq))
+```
+
+```{r, fig.align='center'}
+#| label: fig-confusionmatrix30
+#| fig-cap: "Confusion Matrix: Quadratic Discriminant Analysis"
+#| code-fold: true
+ggplot(plotTable, aes(x = Direction, y = Prediction, fill = Correct, alpha = prop)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), vjust = .5, fontface  = "bold", alpha = 1) +
+  scale_fill_manual(values = c("TRUE" = "#8F95D3", "FALSE" = "#DBB1BC")) +
+  theme_bw() +
+  xlim(rev(levels(plt$Direction)))
+```
+
+```{r, echo=FALSE}
+cat("Accuracy:", round((61+0)/nrow(Weekly_test),3))
+```
+
+## Model Comparison
+
+### Question (i)
+
+*Which of these methods appears to provide the best results on this data?*
+
+The two best models are Logit and LDA. The accuracy of the Naive Bayes is very similar to that of the QDA model, being both the second best option.
+
+# DSM: KNN, Logit & LDA
+
+In this question you will produce a picture like Figure 2.2 in the book Elements of Statistical Learning on pp.15, but for a different dataset. Try to understand first the code for this Figure by running the posted file `mixture.R`, where the generated dataset for Figure 2.2 and the code is given.
+
+### Question 1
+
+Generate a dataset consisting of `n = 100` observations from the logit model below:
+
+$$\Pr(y=1|x)=\frac{1}{1+\exp(-\beta_1x_1-\beta_2x_2)}$$ with $x_1\sim_{\text{iid }} N(0,1)$, $x_2\sim_{\text{idd}} N(0,4)$, $\beta_1=2$ and $\beta_2=3$. Here $x_1 \perp x_2$ but you don't need to impose this in the analysis.
+
+```{r}
+n <- 100
+set.seed(666)
+
+# Covariates
+x1 <- rnorm(n, mean = 0, sd = 1)
+x2 <- rnorm(n, mean = 0, sd = 2)
+
+# Coefficients
+b1 <- 2
+b2 <- 3
+
+# Single Index
+z <- b1*x1 + b2*x2
+
+# Logit Model
+pr <- 1/(1+exp(-z))
+```
+
+We can now generate our dependent variable:
+
+```{r}
+y <- as.factor(rbinom(n,1,pr))
+```
+
+We generate a `dataframe`:
+
+```{r}
+data <- data.frame(cbind(y, x1, x2))
+```
+
+### Question 2
+
+Plot the data in the two dimensions $x_1$ and $x_2$, using orange and blue circles for the two classes in $y$.
+
+```{r, fig.align='center'}
+#| label: fig-scatterplot1
+#| fig-cap: "Basic Scatterplot"
+data %>% 
+  ggplot(aes(x = x1, y = x2, color = as.factor(y))) +
+  geom_point(size = 3, alpha = 0.65) +
+  theme_bw() + xlab("X1") + ylab("X2") +
+  scale_color_manual(values = c("blue", "orange")) + 
+  theme(legend.position="none")
+```
+
+### Question 3
+
+The Bayes decision boundary are the points $x_1$ and $x_2$ such that $\Pr(y = 1 | x) = 0.5$.
+
+For each $x_1$ in the simulated (or training) data, calculate $x_2$ such that $\Pr(y = 1 | x) = 0.5$ and add the Bayes decision boundary on the plot in b) using a dashed purple line. Is this boundary linear and can you find the exact formula for it? Explain.
+
+We have that:
+
+$$
+\Pr(y=1|x)=0.5\equiv \frac{1}{1+\exp(z)}=\frac{\exp(z)}{1+\exp(z)}
+$$
+
+which means that the odds ratio is $1$. This implies that $z=\beta_1x_1+\beta_2x_2=0$. Finally, we can get the relationship between the covariates, which is defined by a **straight line**:
+
+$$
+x_2=-\frac{\beta_1}{\beta_2}x_1
+$$
+
+Let's generate our data now:
+
+```{r}
+data <- cbind(data, bayes = -b1*x1/b2)
+```
+
+```{r, fig.align='center'}
+#| label: fig-scatterplot2
+#| fig-cap: "Linear Bayes Decision Boundary"
+data %>% 
+  ggplot(aes(x = x1)) +
+  geom_point(aes(y = x2, color = as.factor(y)), size = 3, alpha = 0.65) +
+  geom_line(aes(y = bayes), size = 1, color = "purple", linetype = 6, alpha = 0.9) +
+  theme_bw() + xlab("X1") + ylab("X2") +
+  scale_color_manual(values = c("blue", "orange")) + 
+  theme(legend.position="none")
+```
+
+### Question 4
+
+Construct a test set on a grid of `g = 50` values for $x_1$ and $x_2$, ranging from their minimum to their maximum. Generate a test set from each combination of $x_1$ and $x_2$, and call it test. Gather the training set for $x$ into a data frame called train.
+
+Let's start with our **train data**:
+
+```{r}
+train <- data.frame(cbind(y, x1, x2))
+```
+
+Now our **test data**:
+
+```{r}
+g <- 50
+
+x1_test <- seq(min(x1), max(x1), length.out = g)
+x2_test <- seq(min(x2), max(x2), length.out = g)
+
+test <- expand.grid(x1_test, x2_test)
+```
+
+### Question 5
+
+Run a KNN analysis with `k = 3` nearest neighbors on the test data using the training data and the realizations of $y$. Use the command `knn()`.
+
+Let's scale our covariates first:
+
+```{r}
+s.train <- scale(train[,2:3])
+s.test <- scale(test)
+```
+
+We run our `knn()`:
+
+```{r}
+knn.fit3 <- knn(s.train, s.test, y, k=3, prob = TRUE)
+```
+
+### Question 6
+
+Following the `mixture.R` code, plot the training data with circles, the test data with dots, each with the color blue or orange according to which class they either belong to (in the training data) or to which class they were assigned to (in the test data). Add the **KNN decision boundary** to the plot using `contour()` and the Bayes decision boundary.
+
+```{r}
+prob3 <- attr(knn.fit3, "prob")
+prob3 <- ifelse(knn.fit3=="1", prob3, 1-prob3) # if class =1 return the prob of 1
+probm3 <- matrix(prob3, g, g) 
+```
+
+```{r, fig.align='center'}
+#| label: fig-scatterplot3
+#| fig-cap: "KNN Bayes Decision Boundary"
+par(mar=rep(2,4))
+contour(x1_test, x2_test, probm3, levels=0.5, labels="", xlab="X1", ylab="X2", main=
+"3-nearest neighbour", axes=FALSE)
+points(train[,2:3], col=ifelse(y==1, "orange", "blue"))
+lines(data[,c("x1", "bayes")], type="l", lty=2, lwd=2, col="purple")
+points(test, pch=".", cex=1.2, col=ifelse(probm3>0.5, "orange", "blue"))
+box()
+```
+
+### Question 7
+
+Repeat e) and f) with `k = 10` and `k = 15`. Calculate the test error rate for each of `k = 3`; `10`; `15`, and the Bayes decision boundary. Which `k` gets closest to the Bayes decision boundary? Explain why this makes sense or not.
+
+**Case**: `k=10`:
+
+```{r}
+knn.fit10 <- knn(s.train, s.test, y, k=10, prob = TRUE)
+
+prob10 <- attr(knn.fit10, "prob")
+prob10 <- ifelse(knn.fit10=="1", prob10, 1-prob10) # if class =1 return the prob of 1
+probm10 <- matrix(prob10, g, g) 
+```
+
+```{r, fig.align='center'}
+#| label: fig-scatterplot33
+#| fig-cap: "KNN Bayes Decision Boundary"
+par(mar=rep(2,4))
+contour(x1_test, x2_test, probm10, levels=0.5, labels="", xlab="X1", ylab="X2", main=
+"10-nearest neighbour", axes=FALSE)
+points(train[,2:3], col=ifelse(y==1, "orange", "blue"))
+lines(data[,c("x1", "bayes")], type="l", lty=2, lwd=2, col="purple")
+points(test, pch=".", cex=1.2, col=ifelse(probm10>0.5, "orange", "blue"))
+box()
+```
+
+**Case**: `k=15`:
+
+```{r}
+knn.fit15 <- knn(s.train, s.test, y, k=15, prob = TRUE)
+
+prob15 <- attr(knn.fit15, "prob")
+prob15 <- ifelse(knn.fit15=="1", prob15, 1-prob15) # if class =1 return the prob of 1
+probm15 <- matrix(prob15, g, g) 
+```
+
+```{r, fig.align='center'}
+#| label: fig-scatterplot4
+#| fig-cap: "KNN Bayes Decision Boundary"
+par(mar=rep(2,4))
+contour(x1_test, x2_test, probm15, levels=0.5, labels="", xlab="X1", ylab="X2", main=
+"15-nearest neighbour", axes=FALSE)
+points(train[,2:3], col=ifelse(y==1, "orange", "blue"))
+lines(data[,c("x1", "bayes")], type="l", lty=2, lwd=2, col="purple")
+points(test, pch=".", cex=1.2, col=ifelse(probm15>0.5, "orange", "blue"))
+box()
+```
+
+Finally, we can get the **test error rate**:
+
+```{r}
+# Generate the true classes for test data
+z.test = b1*test[,1] + b2*test[,2]
+pr.test = 1/(1+exp(-z.test))
+y.test = as.factor(rbinom(length(pr.test),1,pr.test))
+```
+
+```{r}
+table(knn.fit3,y.test)
+```
+
+```{r, echo=FALSE}
+cat("Test Error Rate (k=3):", mean(knn.fit3!=y.test))
+```
+
+```{r}
+table(knn.fit10,y.test)
+```
+
+```{r, echo=FALSE}
+cat("Test Error Rate (k=10):", mean(knn.fit10!=y.test))
+```
+
+```{r}
+table(knn.fit15,y.test)
+```
+
+```{r, echo=FALSE}
+cat("Test Error Rate (k=15):", mean(knn.fit15!=y.test))
+```
