@@ -1,4 +1,4 @@
-# Data Science Methods
+# [Data Science Methods](https://ephemeral-malabi-5f3c48.netlify.app/)
 
 This website [here](https://ephemeral-malabi-5f3c48.netlify.app/) hosts all the labs and assignments I did during the course **“Data Science Methods”** (DSM) taught at Tilburg University (2023).
 
