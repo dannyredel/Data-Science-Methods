@@ -1,0 +1,558 @@
+---
+title: "Model Selection & Regularization"
+author: "Daniel Redel"
+toc: true
+format:
+  html:
+    html-math-method: katex
+    code-tools: true
+    self-contained: true
+execute:
+  warning: false
+---
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls())
+library(ISLR2)
+library(tidyverse)
+library(gtsummary)
+library(kableExtra)
+library(factoextra)
+library(discrim)
+library(corrplot)
+library(modelsummary)
+library(yardstick)
+library(caret)
+library(MASS)
+library(class)
+library(e1071)
+library(viridis)
+
+library(glmnet)
+
+library(broom)
+library(ggpubr)
+library(fpc)
+
+mycolors <- c("#AED8CC", "#CD6688", "#7A316F", "#461959")
+```
+
+# ISLR: Baseball Players Salary
+
+Here we apply regularization methods to the `Hitters` data. We wish to predict a baseball player's `Salary` on the basis of various statistics associated with performance in the previous year.
+
+First, let's clean the missing values.
+
+```{r dataset}
+library(dplyr)
+hitters <- ISLR::Hitters %>% na.omit()
+```
+
+```{r, echo=FALSE}
+#| label: tbl-dataset1
+#| tbl-cap: "Baseball Dataset"
+head(hitters) %>% 
+  kbl() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+## Summary Statistics
+
+We can show some statistics
+
+```{r, cache=TRUE}
+#| label: tbl-summary1
+#| tbl-cap: "Summary Statistics"
+hitters %>% 
+  dplyr::select(Salary, Years, Hits, CHits, HmRun, Runs, AtBat, CAtBat, Walks) %>% 
+  tbl_summary(statistic = list(
+    all_continuous() ~ "{mean} ({sd})"),
+    digits = all_continuous() ~ 3)
+```
+
+Let's take a closer look at the `Salary` distribution:
+
+```{r, fig.align='center'}
+#| label: fig-salary1
+#| fig-cap: "Salary Distribution of Baseball Players"
+#| code-fold: true
+hitters %>% 
+  ggplot(aes(x = Salary, fill = Division)) +
+  geom_density(alpha = 0.7) +  
+  scale_fill_manual(values = mycolors) + theme_bw()
+```
+
+## Ridge Regression
+
+We will use the `glmnet` package to perform ridge regression. The main function in this package is `glmnet()`, which can be used to fit ridge regression models, lasso models, and more.
+
+This function has slightly different syntax from other model-fitting functions that we have encountered thus far. In particular, we must pass in an `x` matrix as well as a `y` vector, and we do not use the `y ∼ x` syntax.
+
+```{r}
+x <- model.matrix(Salary~., data = hitters)[,-1]
+y <- hitters$Salary
+```
+
+The `glmnet()` function has an `alpha` argument that determines what type of model is fit. If `alpha=0` then a **ridge regression** model is fit, and if `alpha=1` then a lasso model is fit. We first fit a ridge regression model.
+
+-   We choose to compute the ridge regression using a range of lambda values that goes from `10^10` (very close to the null model, including only the intercept) to `10^(-2)` (very close to the full OLS model).
+
+-   Note that by default, the `glmnet()` function standardizes the variables so that they are on the same scale. To turn off this default setting, use the argument `standardize = FALSE`.
+
+```{r}
+grid <- 10^seq(10, -2, length = 100)
+ridge.mod <- glmnet(x, y, alpha = 0, lambda = grid)
+```
+
+Ridge gives us a **path** of possible models:
+
+```{r}
+par(mai=c(.9,.8,.8,.8))
+par(mfrow=c(1,1))
+plot(ridge.mod, xvar="lambda", label = TRUE, )
+```
+
+Let's quickly check how the coefficients changes at different values for $\lambda$:
+
+First with $\lambda=11,498$:
+
+```{r}
+#| label: tbl-ridgelambda1
+#| tbl-cap: "Ridge Coefficients (Lambda=11,498)"
+#| code-fold: true
+
+ridge.mod[["lambda"]][50]
+coefficients <- coef(ridge.mod, )[, 50]
+
+as.data.frame(coefficients) %>% 
+  kbl() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+Now with $\lambda=705$:
+
+```{r}
+#| label: tbl-ridgelambda2
+#| tbl-cap: "Ridge Coefficients (Lambda=705)"
+#| code-fold: true
+
+ridge.mod[["lambda"]][60]
+coefficients <- coef(ridge.mod, )[, 60]
+
+as.data.frame(coefficients) %>% 
+  kbl() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+**Main Idea**: The coefficients tend to be larger with a lower value of $\lambda$ (although some of them can increase their value).
+
+### Validation Approach (Train and Test Data)
+
+We now split the samples into a training set (70%) and a test set (30%) in order to estimate the test error of ridge regression and the lasso.
+
+```{r sample}
+set.seed(123456) 
+index <- sample(1:nrow(hitters), 0.7*nrow(hitters)) 
+
+train_hitters <- hitters[index,] # Create the training data 
+test_hitters <- hitters[-index,] # Create the test data
+
+dim(train_hitters)
+dim(test_hitters)
+```
+
+We convert it into a matrix:
+
+```{r}
+# Train
+x_train <- model.matrix(Salary~., data = train_hitters)[,-1]
+y_train <- train_hitters$Salary
+
+# Test
+x_test <- model.matrix(Salary~., data = test_hitters)[,-1]
+y_test <- test_hitters$Salary
+```
+
+Now, to evaluate it's predicting performance, we will use the **MSE/RMSE metrics**:
+
+```{r MSE}
+eval_results <- function(true, predicted, df) {
+  SSE <- sum((predicted - true)^2)
+  MSE <- SSE/nrow(df)                            # Mean-Squared Error
+  RMSE = sqrt(SSE/nrow(df))                      # Root Mean-Squared Error
+
+  # Model performance metrics
+data.frame(
+  MSE = MSE,
+  RMSE = RMSE
+)
+  
+}
+```
+
+Let's run the ridge regression in our training dataset and evaluate using $\lambda=4$:
+
+```{r}
+ridge.mod1 <- glmnet(x_train, y_train, alpha = 0, lambda = grid)
+
+# Test Performance (MSE)
+predict_ridge <- predict(ridge.mod1, s = 4, newx = x_test)
+ridge_MSE <- eval_results(y_test, predict_ridge, test_hitters)
+```
+
+```{r, echo=FALSE}
+#| label: tbl-ridgeperform1
+#| tbl-cap: "Ridge Performance on Test"
+ridge_MSE %>% 
+  kbl() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+What if we use a very large $\lambda$ ?
+
+```{r}
+ridge.mod2 <- glmnet(x_train, y_train, alpha = 0, lambda = grid)
+
+# Test Performance (MSE)
+predict_ridge <- predict(ridge.mod2, s = 1e10, newx = x_test)
+ridge_MSE <- eval_results(y_test, predict_ridge, test_hitters)
+```
+
+```{r, echo=FALSE}
+#| label: tbl-ridgeperform2
+#| tbl-cap: "Ridge Performance on Test"
+ridge_MSE %>% 
+  kbl() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+So fitting a ridge regression model with $λ = 4$ leads to a much lower test MSE than fitting a model with just an intercept.
+
+### Choosing $\lambda$ with Cross-Validation
+
+In general, instead of arbitrarily choosing $λ$, it would be better to use cross-validation to choose the tuning parameter $λ$. We can do this using the built-in cross-validation function, `cv.glmnet()`.
+
+-   By default, the function `cv.glmnet()` performs *ten-fold cross-validation*, though this can be changed using the argument `nfolds`. Let's use 5 for our example
+
+-   Note that we set a **random seed first** so our results will be reproducible, since the choice of the cross-validation folds is random.
+
+```{r}
+set.seed(12345) 
+mod.ridge.cv <- cv.glmnet(x_train, y_train, type.measure = "mse", nfolds = 5)
+plot(mod.ridge.cv)
+```
+
+As you can see from the plot, there are *two types of optimal* $\lambda$*'s* that we can use. We will consider both:
+
+```{r}
+# Save Optimal Lambdas
+lambda_min.ridge <- mod.ridge.cv$lambda.min
+print(lambda_min.ridge)
+coeff_min <- coef(mod.ridge.cv, s = "lambda.min")[,1]
+
+lambda_1se.ridge <- mod.ridge.cv$lambda.1se
+print(lambda_1se.ridge)
+coeff_1se <- coef(mod.ridge.cv, s = "lambda.1se")[,1]
+```
+
+```{r}
+#| label: tbl-ridge.optimal1
+#| tbl-cap: "Ridge Coefficients - Optimal Lambda"
+#| code-fold: true
+data.frame(cbind(coeff_min, coeff_1se)) %>% 
+  kbl() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+Now let's use that value to predict `y_test` and check the MSE:
+
+```{r}
+ridge.mod3 <- glmnet(x_train, y_train, alpha = 0, lambda = lambda_min.ridge)
+# Test Performance (MSE)
+predict_ridge <- predict(ridge.mod3, newx = x_test)
+ridge_MSE <- eval_results(y_test, predict_ridge, test_hitters)
+```
+
+```{r, echo=FALSE}
+#| label: tbl-ridge.cv.perform
+#| tbl-cap: "Ridge Performance on Test"
+ridge_MSE %>% 
+  kbl() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+This is a lower MSE than when we used $\lambda=4$.
+
+## LASSO Regression
+
+We now ask whether the LASSO can yield either a more accurate or a more interpretable model than ridge regression. In order to fit a LASSO model, we once again use the `glmnet()` function; however, this time we use the argument `alpha=1`.
+
+```{r}
+lasso.mod1 <- glmnet(x_train, y_train, alpha = 1, lambda = grid)
+plot(lasso.mod1)
+```
+
+We can see from the coefficient plot that depending on the choice of tuning parameter, some of the coefficients will be **exactly equal to zero**.
+
+### Choosing $\lambda$ with Cross-Validation
+
+Now we perform cross validation to find the best value of $\lambda$:
+
+```{r}
+set.seed(12345) 
+mod.lasso.cv <- cv.glmnet(x_train, y_train, type.measure = "mse", nfolds = 5)
+plot(mod.lasso.cv)
+```
+
+```{r}
+# Save Optimal Lambdas
+lambda_min.lasso <- mod.lasso.cv$lambda.min
+print(lambda_min.lasso)
+coeff_min <- coef(mod.lasso.cv, s = "lambda.min")[,1]
+
+lambda_1se.lasso <- mod.lasso.cv$lambda.1se
+print(lambda_1se.lasso)
+coeff_1se <- coef(mod.lasso.cv, s = "lambda.1se")[,1]
+```
+
+```{r}
+#| label: tbl-lasso.optimal1
+#| tbl-cap: "LASSO Coefficients - Optimal Lambda"
+#| code-fold: true
+data.frame(cbind(coeff_min, coeff_1se)) %>% 
+  kbl() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+```{r}
+lasso.mod2 <- glmnet(x_train, y_train, alpha = 0, lambda = lambda_min.lasso)
+# Test Performance (MSE)
+predict_lasso <- predict(lasso.mod2, s = 4, newx = x_test)
+lasso_MSE <- eval_results(y_test, predict_ridge, test_hitters)
+```
+
+```{r, echo=FALSE}
+#| label: tbl-lassoperform
+#| tbl-cap: "LASSO Performance on Test"
+lasso_MSE %>% 
+  kbl() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+## $k$-fold CV Model Comparison
+
+Just a fancy way of combining regularization with cross-validation to compare model performance.
+
+### Lasso CV
+
+```{r k-fold_lasso1, cache=TRUE}
+set.seed(12345)  
+n = nrow(hitters)
+K = 10 # # folds
+foldid = rep(1:K, each=ceiling(n/K))[sample(1:n)]
+
+OOS.lasso.min=data.frame(MSE=rep(NA,K), RMSE=rep(NA, K))
+
+for(k in 1:K){
+  
+  train = which(foldid!=k) 
+  
+  # train.data conversion
+  k.train <- hitters[train,]
+  x_train <- model.matrix(Salary~., data = k.train)[,-1]
+  y_train <- k.train$Salary
+   
+  # test.data conversion
+  k.test <- hitters[-train,]
+  x_test <- model.matrix(Salary~., data = k.test)[,-1]
+  y_test <- k.test$Salary 
+  
+  #Choosing Tuning Parameter
+  mod.lasso.cv <- cv.glmnet(x_train, y_train, type.measure = "mse", nfolds = 5)
+  lambda_min <- mod.lasso.cv$lambda.min
+  lambda_1se <- mod.lasso.cv$lambda.1se
+  
+  #fit regression on train
+  mod.lasso <- glmnet(x_train, y_train, alpha = 1, lambda = lambda_min)
+  
+  #predict on test
+  predictions_test <- predict(mod.lasso, s = lambda_min, newx = x_test)
+  
+  #MSE
+  OOS.lasso.min$MSE[k] <- eval_results(y_test, predictions_test, k.test)[,1]
+  OOS.lasso.min$RMSE[k] <- eval_results(y_test, predictions_test, k.test)[,2]
+
+    # print progress
+  cat(k, "  ")
+  
+}
+mean(OOS.lasso.min$RMSE)
+```
+
+```{r k-fold_lasso2, cache=TRUE}
+set.seed(12345)  
+n = nrow(hitters)
+K = 10 # # folds
+foldid = rep(1:K, each=ceiling(n/K))[sample(1:n)]
+
+OOS.lasso.1se=data.frame(MSE=rep(NA,K), RMSE=rep(NA, K))
+
+
+for(k in 1:K){
+  
+  train = which(foldid!=k) 
+  
+  # train.data conversion
+  k.train <- hitters[train,]
+  x_train <- model.matrix(Salary~., data = k.train)[,-1]
+  y_train <- k.train$Salary
+   
+  # test.data conversion
+  k.test <- hitters[-train,]
+  x_test <- model.matrix(Salary~., data = k.test)[,-1]
+  y_test <- k.test$Salary 
+  
+  #Choosing Tuning Parameter
+  mod.lasso.cv <- cv.glmnet(x_train, y_train, type.measure = "mse", nfolds = 5)
+  lambda_min <- mod.lasso.cv$lambda.min
+  lambda_1se <- mod.lasso.cv$lambda.1se
+  
+  #fit regression on train
+  mod.lasso <- glmnet(x_train, y_train, alpha = 1, lambda = lambda_1se)
+  
+  #predict on test
+  predictions_test <- predict(mod.lasso, s = lambda_1se, newx = x_test)
+  
+  #MSE
+  OOS.lasso.1se$MSE[k] <- eval_results(y_test, predictions_test, k.test)[,1]
+  OOS.lasso.1se$RMSE[k] <- eval_results(y_test, predictions_test, k.test)[,2]
+
+    # print progress
+  cat(k, "  ")
+  
+}
+mean(OOS.lasso.1se$RMSE)
+```
+
+### Ridge CV
+
+```{r k-fold_ridge1, cache=TRUE}
+set.seed(12345)  
+n = nrow(hitters)
+K = 10 # # folds
+foldid = rep(1:K, each=ceiling(n/K))[sample(1:n)]
+
+OOS.ridge.min=data.frame(MSE=rep(NA,K), RMSE=rep(NA, K))
+
+
+for(k in 1:K){
+  
+  train = which(foldid!=k) 
+  
+  # train.data conversion
+  k.train <- hitters[train,]
+  x_train <- model.matrix(Salary~., data = k.train)[,-1]
+  y_train <- k.train$Salary
+   
+  # test.data conversion
+  k.test <- hitters[-train,]
+  x_test <- model.matrix(Salary~., data = k.test)[,-1]
+  y_test <- k.test$Salary
+  
+  #Choosing Tuning Parameter
+  mod.ridge.cv <- cv.glmnet(x_train, y_train, alpha=0, type.measure = "mse", nfolds = 5)
+  lambda_min <- mod.ridge.cv$lambda.min
+  lambda_1se <- mod.ridge.cv$lambda.1se
+  
+  #fit regression on train
+  mod.ridge <- glmnet(x_train, y_train, alpha = 0, lambda = lambda_min)
+  
+  #predict on test
+  predictions_test <- predict(mod.ridge, s = lambda_min, newx = x_test)
+  
+  #MSE
+  OOS.ridge.min$MSE[k] <- eval_results(y_test, predictions_test, k.test)[,1]
+  OOS.ridge.min$RMSE[k] <- eval_results(y_test, predictions_test, k.test)[,2]
+
+    # print progress
+  cat(k, "  ")
+  
+}
+mean(OOS.ridge.min$RMSE)
+```
+
+```{r k-fold_ridge2, cache=TRUE}
+set.seed(12345)  
+n = nrow(hitters)
+K = 10 # # folds
+foldid = rep(1:K, each=ceiling(n/K))[sample(1:n)]
+
+OOS.ridge.1se=data.frame(MSE=rep(NA,K), RMSE=rep(NA, K))
+
+
+for(k in 1:K){
+  
+  train = which(foldid!=k) 
+  
+  # train.data conversion
+  k.train <- hitters[train,]
+  x_train <- model.matrix(Salary~., data = k.train)[,-1]
+  y_train <- k.train$Salary
+   
+  # test.data conversion
+  k.test <- hitters[-train,]
+  x_test <- model.matrix(Salary~., data = k.test)[,-1]
+  y_test <- k.test$Salary 
+  
+  #Choosing Tuning Parameter
+  mod.ridge.cv <- cv.glmnet(x_train, y_train, alpha=0, type.measure = "mse", nfolds = 5)
+  lambda_min <- mod.ridge.cv$lambda.min
+  lambda_1se <- mod.ridge.cv$lambda.1se
+  
+  #fit regression on train
+  mod.ridge <- glmnet(x_train, y_train, alpha = 0, lambda = lambda_1se)
+  
+  #predict on test
+  predictions_test <- predict(mod.ridge, s = lambda_1se, newx = x_test)
+  
+  #MSE
+  OOS.ridge.1se$MSE[k] <- eval_results(y_test, predictions_test, k.test)[,1]
+  OOS.ridge.1se$RMSE[k] <- eval_results(y_test, predictions_test, k.test)[,2]
+
+    # print progress
+  cat(k, "  ")
+  
+}
+mean(OOS.ridge.1se$RMSE)
+```
+
+Finally, we build the plot that compares all the four models:
+
+```{r}
+OOS.lasso.min <- OOS.lasso.min %>% mutate(Model="Lasso Min")
+OOS.lasso.1se <- OOS.lasso.1se %>% mutate(Model="Lasso 1SE")
+
+OOS.ridge.min <- OOS.ridge.min %>% mutate(Model="Ridge Min")
+OOS.ridge.1se <- OOS.ridge.1se %>% mutate(Model="Ridge 1SE")
+
+### MERGE
+OOS <- rbind(OOS.lasso.min, OOS.lasso.1se, OOS.ridge.min, OOS.ridge.1se)
+```
+
+#### Model Comparison Plot
+
+```{r plot3, fig.align='center', fig.width = 6, fig.height = 3.5}
+#| label: fig-2
+#| fig-cap: "Model Comparison: k-fold Out-of-Sample RMSE"
+#| code-fold: true
+OOS %>%
+  #filter(!Model=="OLS") %>% 
+  ggplot( aes(x=reorder(Model,RMSE), y=RMSE, fill=Model)) + 
+  geom_boxplot() +
+  geom_jitter(shape=16, position=position_jitter(0.2)) +
+  theme_bw() + theme(legend.position="none") +
+  xlab("") +
+  scale_y_continuous(labels = scales::comma) +
+  scale_fill_manual(values = mycolors)
+```

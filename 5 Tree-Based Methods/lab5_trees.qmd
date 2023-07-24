@@ -1,0 +1,432 @@
+---
+title: "Tree-Based Methods"
+author: "Daniel Redel"
+toc: true
+format:
+  html:
+    html-math-method: katex
+    code-tools: true
+    self-contained: true
+execute:
+  warning: false
+---
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls())
+library(ISLR2)
+library(tidyverse)
+library(gtsummary)
+library(kableExtra)
+library(factoextra)
+library(discrim)
+library(corrplot)
+library(modelsummary)
+library(yardstick)
+library(caret)
+library(MASS)
+library(class)
+library(e1071)
+library(viridis)
+
+library(tree)
+library(rpart) # good!
+library(rpart.plot)
+library(rattle)
+library(vip) # variable importance plot
+library(modelr)
+library(randomForest)
+library(gbm)
+library(xgboost)
+
+library(broom)
+library(ggpubr)
+library(fpc)
+
+mycolors <- c("#AED8CC", "#CD6688", "#7A316F", "#461959")
+```
+
+# Classification Trees
+
+We first use classification trees to analyze the `Carseats` data set. In these data, `Sales` is a continuous variable, and so we begin by recoding it as a binary variable:
+
+-   We create a new variable `High` to denote if `Sales <= 8`, then the `Sales` predictor is removed as it is a perfect predictor of `High`.
+
+```{r}
+carseats <- ISLR::Carseats %>% 
+  as_tibble() %>% 
+  mutate(High = factor(ifelse(Sales <= 8, "No", "Yes")))
+```
+
+## Summary Statistics
+
+```{r, echo=FALSE}
+#| label: tbl-dataset1
+#| tbl-cap: "Carseats Dataset"
+head(carseats) %>% 
+  kbl() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+```{r, cache=TRUE}
+#| label: tbl-summary1
+#| tbl-cap: "Summary Statistics"
+carseats %>% 
+  tbl_summary(statistic = list(
+    all_continuous() ~ "{mean} ({sd})"),
+    digits = all_continuous() ~ 3)
+```
+
+## Classification Trees
+
+Now we try to predict `High` using all variables but `Sales`.
+
+```{r}
+tree_carseats <- tree(High ~ . - Sales, data = carseats)
+summary(tree_carseats)
+```
+
+The `summary()` function lists the variables that are used as internal nodes in the tree, the number of terminal nodes, and the (training) error rate. We see that the **training error rate is 9%**.
+
+But we will actually use the `rpart` package for trees.
+
+The `rpart` function has some default parameters that prevented our tree from growing. Namely `minsplit` and `minbucket`. 
+
+-   `minsplit` is *"the minimum number of observations that must exist in a node in order for a split to be attempted"*; 
+
+-   `minbucket` is *"the minimum number of observations in any terminal node"*. 
+
+```{r}
+tree_carseats <- rpart(High ~ . - Sales, 
+                       data = carseats, 
+                       method = "class")
+```
+
+The `rpart.plot` package provides functions to let us easily visualize the decision tree. As the name implies, it only works with `rpart` trees.
+
+```{r, fig.align='center'}
+#| label: fig-tree1
+#| fig-cap: "Decision Tree of Sales"
+fancyRpartPlot(tree_carseats, caption = NULL)
+```
+
+We can see that the most important variable to predict high sales appears to be shelving location (`ShelveLoc`) as it forms the first node. But if we actualy report the Variable Importance, we will see that `Price` is the most important variable here:
+
+```{r}
+#| label: tbl-vi1
+#| tbl-cap: "Variable Importance"
+#| code-fold: true
+data.frame(vi=tree_carseats$variable.importance) %>% 
+  kbl() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+### Performance Assessment
+
+In order to properly evaluate the performance of a classification tree on these data, we must estimate the test error rather than simply computing the training error.
+
+```{r}
+set.seed(345)
+index <- sample(1:nrow(carseats), 0.7*nrow(carseats)) 
+
+train <- carseats[index,] # Create the training data 
+test <- carseats[-index,] # Create the test data
+
+dim(train)
+dim(test)
+```
+
+We can build a **confusion matrix** to assess prediction accuracy on our **test data**:
+
+```{r}
+tree_carseats <- rpart(High ~ . - Sales, 
+                       data = train, 
+                       method = "class")
+
+tree.pred <- predict (tree_carseats, newdata = test, type = "class")
+cm <- confusionMatrix(factor(tree.pred), test$High)
+cm
+```
+
+We have an **Accuracy of 70.83%**.
+
+A more visual representation of the confusion matrix can be done by generating a `ggplot2` chart:
+
+```{r}
+plt <- as.data.frame(cm$table)
+
+plotTable <- plt %>%
+  mutate(Correct = ifelse(plt$Prediction == plt$Reference, "TRUE", "FALSE")) %>%
+  group_by(Reference) %>%
+  mutate(prop = Freq/sum(Freq))
+```
+
+```{r}
+#| label: fig-cm1
+#| fig-cap: "Confusion Matrix: Decision Tree"
+#| code-fold: true
+ggplot(plotTable, aes(x = Reference, y = Prediction, fill = Correct, alpha = prop)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), vjust = .5, fontface  = "bold", alpha = 1) +
+  scale_fill_manual(values = c("TRUE" = "#AED8CC", "FALSE" = "#CD6688")) +
+  theme_bw() +
+  xlim(rev(levels(plt$Reference)))
+```
+
+### Pruning the Tree
+
+Next, we consider whether pruning the tree might lead to improved results.
+
+-   The `printcp` and `plotcp` functions provide the cross-validation error for each `nsplit` and can be used to prune the tree.
+
+-   The one with ***least cross-validated error (`xerror`) is the optimal value of CP*** given by the `printcp()` function.
+
+-   By default, `rpart` is performing some automated tuning.
+
+```{r}
+set.seed(345)
+tree_carseats <- rpart(High ~ . - Sales, 
+                       data = train, 
+                       method = "class",
+                       cp = 0)
+plotcp(tree_carseats)
+```
+
+```{r}
+#| label: tbl-prun1
+#| tbl-cap: "Cost-Complexity"
+#| code-fold: true
+data.frame(tree_carseats$cptable) %>% 
+  kbl() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+The model with the lowest `xerror`:
+
+```{r}
+#| label: fig-pruntree2
+#| fig-cap: "Prunned Classification Tree"
+ptree <- prune(tree_carseats,
+              cp = tree_carseats$cptable[which.min(tree_carseats$cptable[,"xerror"]),"CP"])
+
+prp(ptree, yesno = 2, extra = 6, box.palette=c("#CD6688", "#AED8CC")) # or extra=4
+
+```
+
+```{r}
+tree.pred <- predict (ptree, newdata = test, type = "class")
+cm <- confusionMatrix(factor(tree.pred), test$High)
+cm$overall[1]
+```
+
+-   Note that we use `prp` function to customize our tree visualization.
+
+# Regression Trees
+
+Here we fit a regression tree to the `Boston` data set. First, we create a training set, and fit the tree to the training data:
+
+```{r}
+set.seed(345)
+
+index <- sample(1:nrow(Boston), 0.7*nrow(Boston)) 
+
+boston_train <- Boston[index,] # Create the training data 
+boston_test <- Boston[-index,] # Create the test data
+```
+
+Fitting the model to the training data set:
+
+```{r}
+set.seed(345)
+tree_boston <- rpart(medv ~., 
+                       data = boston_train, 
+                       method = "anova") ## for regression trees
+```
+
+```{r, fig.align='center'}
+#| label: fig-regtree
+#| fig-cap: "Regression Tree of Home Value"
+prp(tree_boston,yesno = 2, box.palette=c("#CD6688", "#AED8CC"))
+```
+
+### Performance Assessment
+
+To evaluate predicting performance in regression trees, we will use the **MSE/RMSE metrics**:
+
+```{r MSE}
+eval_results <- function(true, predicted, df) {
+  SSE <- sum((predicted - true)^2)
+  MSE <- SSE/nrow(df)                            # Mean-Squared Error
+  RMSE = sqrt(SSE/nrow(df))                      # Root Mean-Squared Error
+
+  # Model performance metrics
+data.frame(
+  MSE = MSE,
+  RMSE = RMSE
+)
+  
+}
+```
+
+```{r}
+#| label: tbl-performance.reg1
+#| tbl-cap: "Model Performance: Regression Tree"
+tree.pred <- predict(tree_boston, newdata = boston_test) ## no "class" type
+
+eval_results(boston_test$medv, tree.pred, boston_test) %>% 
+  kbl() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+
+```
+
+### Pruning the Tree
+
+Let's consider the full tree:
+
+```{r}
+set.seed(345)
+tree_boston <- rpart(medv ~., 
+                       data = boston_train, 
+                       method = "anova", cp = 0.00) 
+plotcp(tree_boston)
+```
+
+```{r, echo=FALSE}
+#| label: fig-pruntree4
+#| fig-cap: "Full Regression Tree"
+prp(tree_boston, yesno = 2, box.palette=c("#CD6688", "#AED8CC")) # or extra=4
+```
+
+```{r}
+#| label: tbl-performance.reg3
+#| tbl-cap: "Model Performance: Full Regression Tree"
+tree.pred <- predict(tree_boston, newdata = boston_test) ## no "class" type
+
+eval_results(boston_test$medv, tree.pred, boston_test) %>% 
+  kbl() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+The model with the lowest `xerror`:
+
+```{r}
+#| label: fig-pruntree3
+#| fig-cap: "Prunned Regression Tree"
+ptree <- prune(tree_boston,
+              cp = tree_boston$cptable[which.min(tree_boston$cptable[,"xerror"]),"CP"])
+
+prp(ptree, yesno = 2, box.palette=c("#CD6688", "#AED8CC")) # or extra=4
+```
+
+Let's get our *MSE/RMSE* metrics:
+
+```{r}
+#| label: tbl-performance.reg12
+#| tbl-cap: "Model Performance: Pruned Regression Tree"
+tree.pred <- predict (ptree, boston_test) ## no "class" type
+
+eval_results(boston_test$medv, tree.pred, boston_test) %>% 
+  kbl() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+# Bagging & Random Forests
+
+Here we apply bagging and random forests to the `Boston` data set. We will be using the `randomForest` package as the engine.
+
+-   A bagging model is a special case of a random forest with $m=p$ where `mtry` is equal to the number of predictors.
+
+-   We can specify the `mtry` to be `ncol()-1` which means that the number of columns in the predictor matrix is used (removing the dependent variable).
+
+## Bagging
+
+Let's start with our bagging model. In bagging, we are using all the predictors available for each split.
+
+```{r}
+set.seed(345)
+bag_boston <- randomForest(medv ~ ., data = boston_train,
+                           mtry = ncol(boston_train)-1, importance = TRUE)
+bag_boston
+```
+
+```{r, fig.align='center'}
+#| label: fig-vip1
+#| fig-cap: "Variable Importance"
+#| code-fold: true
+vip(bag_boston, aesthetics = list(fill = "#CD6688")) + theme_bw()
+```
+
+```{r}
+#| label: tbl-performance.bag
+#| tbl-cap: "Model Performance: Bagging"
+bag.pred <- predict(bag_boston, newdata = boston_test)
+
+eval_results(boston_test$medv, bag.pred, boston_test) %>% 
+  kbl() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+The test MSE is much lower using bagging than using a single decision tree. Let's see if the test error further decreases when using random forest instead.
+
+## Random Forest
+
+Next, let us take a look at a Random Forest.
+
+-   By default, `randomForest()` uses `p/3` variables when building a random forest **for regression trees**, and `sqrt(p)` variables when building a random forest **for classification trees**.
+
+-   Here we use `mtry = 6`.
+
+```{r}
+set.seed(345)
+rf_boston <- randomForest(medv ~ ., data = boston_train,
+                           mtry = 6, importance = TRUE)
+rf_boston
+```
+
+```{r, fig.align='center'}
+#| label: fig-vip2
+#| fig-cap: "Variable Importance"
+#| code-fold: true
+vip(rf_boston, aesthetics = list(fill = "#CD6688")) + theme_bw()
+```
+
+```{r}
+#| label: tbl-performance.rf
+#| tbl-cap: "Model Performance: Random Forest"
+rf.pred <- predict(rf_boston, newdata = boston_test)
+
+eval_results(boston_test$medv, rf.pred, boston_test) %>% 
+  kbl() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+# Boosting
+
+We will now fit a boosted tree model.
+
+-   To fit boosted regression trees we need to specify `distribution = "gaussian"`.
+
+-   To use classification trees instead, we use `distribution = "bernoulli`
+
+We set `n.tree` `= 5000` to grow 5000 trees with a maximal depth of 4:
+
+```{r}
+set.seed(345)
+boost_boston <- gbm(medv ~ .,
+                    data = boston_train,
+                    distribution = "gaussian",
+                    n.trees = 5000,
+                    interaction.depth = 4)
+
+summary(boost_boston)
+```
+
+```{r}
+#| label: tbl-performance.boost
+#| tbl-cap: "Model Performance: Boosting"
+pred_boost <- predict(boost_boston, new_data = boston_test)
+
+eval_results(boston_test$medv, pred_boost, boston_test) %>% 
+  kbl() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```

@@ -1,0 +1,265 @@
+---
+title: "Resampling Methods"
+author: "Daniel Redel"
+toc: true
+format:
+  html:
+    html-math-method: katex
+    code-tools: true
+    self-contained: true
+execute:
+  warning: false
+---
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls())
+library(ISLR2)
+library(tidyverse)
+library(gtsummary)
+library(kableExtra)
+library(factoextra)
+library(modelsummary)
+library(MASS)
+library(ggpubr)
+library(readr)
+#CV
+library(boot)
+```
+
+# ISLR: Cross-Validation and The Bootstrap
+
+In this lab, we explore the resampling techniques covered in this chapter. Some of the commands in this lab may take a while to run on your computer.
+
+When fitting a model it is often desired to be able to calculate a performance metric to quantify how well the model fits the data.
+
+If a model is evaluated on the data it was fit on, you are quite likely to get *over-optimistic results*. It is therefore we **split** our data into testing and training. This way we can fit the model to data and evaluate it on some other that that is similar.
+
+## The Validation Approach
+
+We begin by using the `sample()` function to split the set of observations into two halves, by selecting a random subset of 196 observations out of the original 392 observations. We refer to these observations as the training set.
+
+```{r}
+set.seed(1)
+
+train_auto <- Auto %>% 
+  sample_n(size = 196)
+
+test_auto <- Auto %>% 
+  anti_join(train_auto)
+
+# train <- sample(392, 196)
+```
+
+**Linear Regression Fit**:
+
+```{r}
+lm_auto <- lm(mpg ~ horsepower, data = train_auto)
+# lm_auto <- lm(mpg ~ horsepower, data = Auto, subset = train)
+```
+
+**MSE**:
+
+$$
+\text{MSE}=\frac{1}{n}\sum^n_{i=1}[y_i-\hat{y}_i]^2
+$$
+
+```{r}
+mse <- mean((test_auto$mpg - predict(lm_auto, test_auto))^2)
+```
+
+```{r, echo=FALSE}
+cat("MSE:", mse)
+```
+
+Polynomial Regression Fit:
+
+```{r}
+lm_auto2 <- lm(mpg ~ poly(horsepower, 2), data = train_auto)
+mse2 <- mean((test_auto$mpg - predict(lm_auto2, test_auto))^2)
+```
+
+```{r, echo=FALSE}
+cat("MSE:", mse2)
+```
+
+Quadratic regression performs better than a linear model. Let's also try a cubic model:
+
+```{r}
+lm_auto3 <- lm(mpg ~ poly(horsepower, 3), data = train_auto)
+mse3 <- mean((test_auto$mpg - predict(lm_auto3, test_auto))^2)
+```
+
+```{r, echo=FALSE}
+cat("MSE:", mse3)
+```
+
+## Leave-One-Out Cross-Validation (LOOCV)
+
+Estimating the test error with LOOCV in linear regression:
+
+```{r}
+glm_auto <- glm(mpg ~ horsepower, data = Auto)
+```
+
+```{r, echo=FALSE}
+coef(glm_auto)
+```
+
+The [`glm()`](http://bit.ly/R_glm) function can be used with [`cv.glm()`](http://bit.ly/R_cv_glm) to estimate k-fold cross-validation prediction error. To do this, we re-insert the fitted `glm_auto` into the [`cv.glm()`](http://bit.ly/R_cv_glm)function:
+
+```{r}
+cv_err <- cv.glm(Auto, glm_auto)
+```
+
+```{r, echo=FALSE}
+round(cv_err[["delta"]],2)
+```
+
+We can repeat this process in a [`for()`](http://bit.ly/R_Control) loop to compare the cross-validation error of higher-order polynomials. The following example estimates the polynomial fit of the order 1 through 5 and stores the result in a *`cv.error`* vector.
+
+```{r, cache=TRUE}
+
+loocv_error_poly <- function(n){
+  glm_auto <- glm(mpg ~ poly(horsepower, n), data = Auto)
+
+  cv_err <- cv.glm(Auto, glm_auto)
+  
+  cv_err[["delta"]][[1]]
+}
+
+map_dbl(1:5, loocv_error_poly)
+```
+
+## $k$-Fold Cross-Validation
+
+In addition to LOOCV, [`cv.glm()`](http://bit.ly/R_cv_glm) can also be used to run \$k\$-fold cross-validation. In the following example, we estimate the cross-validation error of polynomials of the order 1 through 10 using $k$-fold cross-validation.
+
+```{r kfold, cache=TRUE}
+set.seed(17)
+k10_error_poly <- function(n){
+  glm_auto <- glm(mpg ~ poly(horsepower, n), data = Auto)
+
+  cv_err_10 <- cv.glm(Auto, glm_auto, K = 10)
+  
+  cv_err_10[["delta"]][[1]]
+}
+
+map_dbl(1:10, k10_error_poly)
+```
+
+In both LOOCV and k-fold cross-validation, we get lower test errors with quadratic models than linear models, but cubic and higher-order polynomials don't offer any significant improvement.
+
+## The Bootstrap
+
+This section illustrates the use of the bootstrap in the simple Section 5.2 of ISLR, as well as on an example involving estimating the accuracy of the linear regression model on the `Auto` data set.
+
+### Accuracy of a Statistic of Internet
+
+First we create a function to compute the alpha statistic:
+
+```{r}
+alpha_fn <- function (data, index){
+  X <- data$X[index]
+  Y <- data$Y[index]
+  
+  (var(Y)-cov(X,Y))/(var(X)+var(Y) -2*cov(X,Y))
+}
+```
+
+```{r}
+set.seed (7)
+alpha_fn(Portfolio , sample (100, 100, replace = T))
+```
+
+Instead of manually repeating this procedure with different samples from our dataset, we can automate this process with the [`boot()`](http://bit.ly/R_boot) function as shown below.
+
+```{r}
+boot(Portfolio, alpha_fn, R = 1000)
+```
+
+### Accuracy of an OLS
+
+We can apply the same bootstrap approach to the [`Auto`](http://bit.ly/ISLR_Auto) dataset by creating a bootstrap function that fits a linear model to our dataset.
+
+```{r}
+coefs_boot <- function(data, index) 
+  return(coef(lm(mpg ~ horsepower, data = data, subset = index)))
+coefs_boot(Auto, 1:392)
+```
+
+We can run this manually on different samples from the dataset.
+
+```{r}
+coefs_boot(Auto, sample(1:392, 392, replace = TRUE))
+```
+
+**Standard Errors**
+
+Finally, we can also automate this by fitting the model on 1000 replicates from our dataset:
+
+```{r bootstrap2, cache=TRUE}
+boot(Auto, coefs_boot, R = 10000)
+```
+
+The [`summary()`](http://bit.ly/R_summary) function be used to compute standard errors for the regression coefficients.
+
+```{r}
+summary(lm(mpg ~ horsepower, data = Auto))$coef
+```
+
+# DSM: Cross-Validation and Bootstrap
+
+In this exercise, we will work with a dataset about home loan eligibility. A housing finance company provides home loans for the houses which were present across all urban, semi-urban and rural areas for their customers. The company validates the eligibility of loan after customer applies for the loan. However, it consumes lot of time for the manual validation of eligibility process.
+
+Our aim is to create a predictive model that will give us possible outcome of a loan application and fasten the procedure for the finance company.
+
+Since acceptance is a binary decision, we will use logistic regression in our predictions. After running the logit model, we will calculate how many misclassifications we have. Then we will use cross validation to calculate test error rate.
+
+In the last part of the exercise we will apply bootstrapping to calculate standard errors of coefficients. We have an analytical formula for standard errors and `glm()` function gives them automatically. We will compare standard errors from theory with the standard errors from bootstrapping.
+
+## Question 1
+
+Load the dataset `homeloan.csv` and summarize it. Eliminate rows with missing values. Convert type of categorical variables to factor.
+
+## Question 2
+
+Estimate a logit regression using `LoanAmount`, `Self Employed`, `Education`, `Married`, `Gender`, `ApplicantIncome`, `Credit History` and `Property Area` as independent variable and `Loan Status` as dependent variable. Summarize estimation results.
+
+## Question 3
+
+Based on the results of this estimation make predictions using 0.5 as threshold.
+
+## Question 4
+
+Write a for loop to implement LOOCV using following steps:
+
+-   Create and empty array of size number of observations by 1.
+
+-   Say for loop has an index of i, estimate model without $i$th observation.
+
+-   Predict outcome of $i$th observation using estimation results.
+
+-   Store predicted outcome in the array you created.
+
+-   Calculate error rate with these new predictions.
+
+## Question 5
+
+Compare error rates in Q3 and Q4.
+
+## Question 6
+
+Write a for loop to implement bootsrapping using following steps:
+
+-   Create an empty array of size 1000 and number of regressors +1 to store estimation results.
+
+-   For each iteration in the for loop, draw a random sample from your data with replacement at the same size with your dataset.
+
+-   Run a logit regression on this new dataset and store its coefficients in the empty array you created.
+
+-   Find standard deviation of coefficients stored in the array.
+
+## Question 7
+
+Compare the standard errors from theory with the standard errors calculated by bootstrapping
